@@ -64,7 +64,7 @@ module.exports = merge(common, {
       }
 
       preloadCache(cesiumStaticPath);
-      console.log(`🔹 Preloaded ${fileCache.size} static files from ${cesiumStaticPath}`);
+      console.log(`Preloaded ${fileCache.size} static files from ${cesiumStaticPath}`);
 
       devServer.app.use(
         compression({
@@ -99,7 +99,7 @@ module.exports = merge(common, {
         })
       );
 
-      console.log('✅ Cesium static assets served from:', cesiumStaticPath);
+      console.log('Cesium static assets served from:', cesiumStaticPath);
       return middlewares;
     },
   },
