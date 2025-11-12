@@ -3,7 +3,6 @@ const webpack = require('webpack');
 const { merge } = require('webpack-merge');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const CopyWebpackPlugin = require('copy-webpack-plugin');
-const TerserPlugin = require('terser-webpack-plugin');
 const common = require('./webpack.common');
 
 const cesiumSource = 'node_modules/cesium/Source';
@@ -12,12 +11,7 @@ const cesiumWorkers = '../Build/Cesium/Workers';
 module.exports = merge(common, {
   optimization: {
     nodeEnv: 'production',
-    minimize: true,
-    minimizer: [
-      new TerserPlugin({
-        extractComments: false
-      })
-    ]
+    minimize: true
   },
   performance: {
     hints: false
@@ -42,13 +36,6 @@ module.exports = merge(common, {
       },
       {
         loader: 'postcss-loader',
-        options: {
-          plugins: [
-            require('autoprefixer')({
-              env: '> 0.5%, last 2 versions, Firefox ESR, not dead, not ie <= 10'
-            })
-          ]
-        }
       },
       {
         loader: 'sass-loader'
@@ -69,7 +56,7 @@ module.exports = merge(common, {
       ]
     }),
     new webpack.optimize.LimitChunkCountPlugin({
-      maxChunks: 1
+      maxChunks: 10
     })
   ]
 });

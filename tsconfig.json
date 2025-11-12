@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES6",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "lib": ["ES6", "DOM"],
+    "allowJs": true,
+    "checkJs": false,
+    "jsx": "react",
+    "esModuleInterop": true,
+    "sourceMap": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "baseUrl": "./src",
+    "typeRoots": ["./types", "./node_modules/@types"],
+  },
+  "include": ["src/**/*"]
+}

@@ -1,3 +1,3 @@
-import Globe from './src/globe';
+import Globe from './src/globe.ts';
 
 export default Globe;

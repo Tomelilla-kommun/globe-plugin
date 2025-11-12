@@ -2,7 +2,10 @@ import Layer from 'ol/layer/Layer';
 import Source from 'ol/source/Source';
 import LayerProperty from 'ol/layer/Property';
 import {
-  Cesium3DTileStyle
+  Cesium3DTileStyle,
+  ColorGeometryInstanceAttribute,
+  Color,
+  PerInstanceColorAppearance
 } from 'cesium';
 
 const superOptions = {
@@ -19,7 +22,17 @@ class ThreedTile extends Layer {
     this.Opacity = 1;
     this.setVisible = (visible) => {
       this.set(LayerProperty.VISIBLE, visible);
-      this.CesiumTileset.show = !this.CesiumTileset.show;
+      if(this.CesiumTileset) {
+        this.CesiumTileset.show = !this.CesiumTileset.show;
+      } else if (this.CesiumModels) {
+        this.CesiumModels.forEach(element => {
+          element.show = !element.show;
+        });
+      } else if(this.CesiumExtrusions) {
+        this.CesiumExtrusions.forEach(element => {
+          element.show = !element.show;
+        });
+      }
     };
     this.setSource(new Source({ projection: 'EPSG:3857' || 'EPSG:4326' }));
     this.getMaxResolution = () => 10000000;
@@ -27,24 +40,48 @@ class ThreedTile extends Layer {
     this.setOpacity = (alpha) => {
       this.Opacity = alpha;
       const regex = /'(.*?)'/;
-      if (this.CesiumTileset.style.color.conditionsExpression) {
-        const expr = this.CesiumTileset.style.color.conditionsExpression.conditions;
-        const cond = expr.map((c) => {
-          const col = regex.exec(c[1])[0];
+      if (this.CesiumTileset) {
+        if (this.CesiumTileset.style.color.conditionsExpression) {
+          const expr = this.CesiumTileset.style.color.conditionsExpression.conditions;
+          const cond = expr.map((c) => {
+            const col = regex.exec(c[1])[0];
+            const string = `color(${col}, ${alpha})`;
+            return [c[0], string];
+          });
+          this.CesiumTileset.style = new Cesium3DTileStyle({
+            color: {
+              conditions: cond
+            }
+          });
+        } else {
+          const expr = this.CesiumTileset.style.color;
+          const col = regex.exec(expr.expression)[0];
           const string = `color(${col}, ${alpha})`;
-          return [c[0], string];
+          this.CesiumTileset.style = new Cesium3DTileStyle({
+            color: string
+          });
+        }
+      } else if (this.CesiumModels) {
+        this.CesiumModels.forEach((model) => {
+          model.color = Cesium.Color.WHITE.withAlpha(alpha);
         });
-        this.CesiumTileset.style = new Cesium3DTileStyle({
-          color: {
-            conditions: cond
+      } else if (this.CesiumExtrusions) {
+        console.log(this)
+        this.CesiumExtrusions.forEach((primitive) => {
+            // get the id you set in the GeometryInstance
+          const id = primitive.geometryInstances.id;
+          const attributes = primitive.getGeometryInstanceAttributes(id);
+          if (!attributes) return;
+
+          let color;
+          if (options.extrusion.color) {
+            const colorName = options.extrusion.color.toUpperCase();
+            color = Color[colorName] || Color.LIGHTGRAY;
+          } else {
+            color = Color.LIGHTGRAY;
           }
-        });
-      } else {
-        const expr = this.CesiumTileset.style.color;
-        const col = regex.exec(expr.expression)[0];
-        const string = `color(${col}, ${alpha})`;
-        this.CesiumTileset.style = new Cesium3DTileStyle({
-          color: string
+
+          attributes.color = Cesium.ColorGeometryInstanceAttribute.toValue(color.withAlpha(alpha));
         });
       }
     };

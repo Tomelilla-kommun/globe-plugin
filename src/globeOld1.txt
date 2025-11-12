@@ -1,0 +1,778 @@
+/**
+ * This code defines a custom Origo UI component called "Globe". It creates a 3D globe using CesiumJS and integrates it into an Origo map.
+ * The component provides various configuration options for the globe, such as terrain providers, 3D tile providers, and globe settings.
+ * It also includes functionality for picking features on the globe and displaying feature information in a popup.
+ * Additionally, it includes buttons for toggling the globe on/off and opening a datetime picker.
+ */
+// @ts-ignore: Suppress module not found error if types are missing
+import OLCesium from 'olcs/OLCesium';
+// @ts-ignore: Suppress module not found error if types are missing
+import Origo from 'Origo';
+import flatpickr from 'flatpickr';
+import * as Cesium from 'cesium';
+import {
+  Ion,
+  IonResource,
+  createWorldTerrainAsync,
+  CesiumTerrainProvider,
+  ScreenSpaceEventHandler,
+  PostProcessStageLibrary,
+  ScreenSpaceEventType,
+  Color,
+  SkyBox,
+  JulianDate,
+  Clock
+} from 'cesium';
+import isGlobeActive from './functions/isglobeactive';
+import addGLTF from './layer/gltf';
+import add3DTile from './layer/threedtile';
+import { threedtile } from './layer/layerhelper';
+import getFeatureInfo from './functions/featureinfo'
+
+window.Cesium = Cesium;
+window.OLCesium = OLCesium;
+
+declare global {
+  interface Window {
+    Cesium: typeof Cesium;
+    OLCesium: typeof OLCesium;
+    oGlobe?: any;
+  }
+}
+
+
+  interface GlobeButton extends Origo.ui.Button {}
+  interface GlobeOptions {
+    target?: string;
+    globeOnStart?: boolean;
+    showGlobe?: boolean;
+    resolutionScale?: number;
+    settings?: Record<string, any>;
+    cesiumTerrainProvider?: string;
+    cesiumIontoken?: string;
+    cesiumIonassetIdTerrain?: number;
+    cesium3DTileUrl?: string;
+    gltf?: Array<{
+      url: string;
+      lat: number;
+      lng: number;
+      height: number;
+      heightReference?: any;
+      animation?: any;
+    }>;
+    deactivateControls?: string[];
+  }
+
+  var globeButton: Origo.ui.Button;
+  var globeEl: Origo.ui.Element;
+
+export const Globe = function Globe(options: GlobeOptions = {}) {
+  let {
+    target = undefined
+  } = options;
+
+  const {
+    globeOnStart,
+    showGlobe = true,
+    resolutionScale = window.devicePixelRatio,
+    settings = {},
+    cesiumTerrainProvider,
+    cesiumIontoken,
+    cesiumIonassetIdTerrain,
+    gltf,
+    deactivateControls = []
+  } = options;
+
+  let map: any;
+  let viewer: any;
+  let oGlobe: any;
+  let oGlobeTarget: string | undefined;
+  let terrain: Cesium.CesiumTerrainProvider | undefined;
+  let featureInfo: any;
+  // let globeEl: Origo.ui.Element;
+  // let globeButton: Origo.ui.Button;
+  let fp: flatpickr.Instance;
+  let flatpickrEl: Origo.ui.Element;
+  let flatpickrButton: Origo.ui.Button;
+  let toggleShadowsButton: Origo.ui.Button;
+  let quickTimePickerButton: Origo.ui.Button;
+  let toggleFXButton: Origo.ui.Button;
+  let scene: Cesium.Scene;
+  let htmlString: string;
+  let el: HTMLElement;
+  let isStreetMode = false;
+
+  const buttons: GlobeButton[] = [];
+
+  // To use Cesium Ion features token needs to be provided in config option "token"
+  if (cesiumIontoken) {
+    Ion.defaultAccessToken = cesiumIontoken;
+  }
+
+  // Toggles between 2D and 3D
+  const toggleGlobe = () => {
+    // Check if map projection is EPSG:4326 or EPSG:3857.
+    // If map has other projection, don't activate globe and log error
+    if (viewer.getProjectionCode() === 'EPSG:4326' || viewer.getProjectionCode() === 'EPSG:3857') {
+      oGlobe.setEnabled(!isGlobeActive(oGlobe));
+      const streetView = document.getElementById('streetView');
+      const controlUI = document.getElementById('controlUI');
+      if(streetView && controlUI) {
+        streetView.style.display = !isGlobeActive(oGlobe) ? 'none' : 'flex';
+        controlUI.style.display = !isGlobeActive(oGlobe) ? 'none' : 'flex';
+      }
+    } else {
+      console.error('Map projection must be EPSG:4326 or EPSG:3857 to be able to use globe mode.');
+    }
+  };
+
+  // Toggles subbuttons to globe button
+  const toggleButtons = () => {
+    const globeButtonEl = document.getElementById(globeButton.getId());
+    if (globeButtonEl) {
+      globeButtonEl.classList.toggle('active');
+    }
+
+    const flatpickrButtonEl = document.getElementById(flatpickrButton.getId());
+    const toggleShadowsButtonEl = document.getElementById(toggleShadowsButton.getId());
+    const quickTimePickerButtonEl = document.getElementById(quickTimePickerButton.getId());
+    const isActive = globeButtonEl ? globeButtonEl.classList.contains('active') : false;
+    const toggleFXButtonEl = document.getElementById(toggleFXButton.getId());
+
+    if (flatpickrButtonEl) flatpickrButtonEl.classList.toggle('hidden', !isActive);
+    if (toggleShadowsButtonEl) toggleShadowsButtonEl.classList.toggle('hidden', !isActive);
+    if (quickTimePickerButtonEl) quickTimePickerButtonEl.classList.toggle('hidden', !isActive);
+    if (toggleFXButtonEl) toggleFXButtonEl.classList.toggle('hidden', !isActive);
+  };
+
+  const helpers = {
+    // Init map with globe or not
+    activeGlobeOnStart: () => {
+      if (globeOnStart) {
+        toggleGlobe();
+        toggleButtons();
+      }
+    },
+    // Renders the globe or not, only effects the terrain and raster overlays on it
+    showGlobeOption: () => {
+      if (!showGlobe) {
+        scene.globe.show = false;
+      }
+    },
+    // Hides Cesium credit container. Put the cesium credits in origo credits container in origo style
+    cesiumCredits: () => {
+      const creditLogoContainers = document.querySelectorAll('.cesium-credit-logoContainer');
+      if (creditLogoContainers.length > 0 && creditLogoContainers[0].parentNode) {
+        (creditLogoContainers[0].parentNode as HTMLElement).style.display = 'none';
+      }
+    },
+    // Helper to hide/unhide Origo controls that has no effect in globe mode
+    setActiveControls: (
+      getGlobe: any,
+      v: {
+      getControlByName: (name: string) => Origo.ui.Control | undefined;
+      }
+    ) => {
+      interface OrigoControl {
+      hide: () => void;
+      unhide: () => void;
+      }
+
+      deactivateControls.forEach((deactivateControl: string) => {
+      const control = v.getControlByName(deactivateControl) as OrigoControl | undefined;
+      if (!control) {
+        console.error(`No control named "${deactivateControl}" to hide/unhide for globe control`);
+        return;
+      }
+      if (isGlobeActive(getGlobe)) {
+        control.hide();
+      } else {
+        control.unhide();
+      }
+      });
+    },
+    // Date and time picker from flatpickr
+    timeSetter() {
+      flatpickrEl = Origo.ui.Element({
+        tagName: 'div',
+        cls: 'flatpickrEl z-index-ontop-top-times20'
+      });
+
+      htmlString = flatpickrEl.render();
+      el = Origo.ui.dom.html(htmlString);
+      const parentEl = document.getElementById(target ?? '');
+      if (parentEl) {
+        parentEl.appendChild(el);
+      } else {
+        console.error(`Element with id "${target}" not found.`);
+      }
+      const flatpickrElement = document.getElementById(flatpickrEl.getId());
+      if (flatpickrElement) {
+        fp = flatpickr(flatpickrElement, {
+          enableTime: true,
+          defaultDate: new Date(),
+          enableSeconds: true,
+          disableMobile: false,
+          time_24hr: true
+        });
+      } else {
+        console.error('Flatpickr element not found');
+      }
+    },
+    // Origo style on picked feature
+    pickedFeatureStyle: () => {
+      const handler = new ScreenSpaceEventHandler(scene.canvas);
+      if (PostProcessStageLibrary.isSilhouetteSupported(scene)) {
+        const silhouetteBlue = PostProcessStageLibrary.createEdgeDetectionStage();
+        silhouetteBlue.uniforms.color = Color.ROYALBLUE;
+        silhouetteBlue.uniforms.length = 0.01;
+        silhouetteBlue.selected = [];
+
+        scene.postProcessStages.add(
+          PostProcessStageLibrary.createSilhouetteStage([
+            silhouetteBlue
+          ])
+        );
+        interface SilhouetteBlueStage {
+          selected: any[];
+          uniforms: {
+            color: Cesium.Color;
+            length: number;
+          };
+        }
+
+        interface PickedFeatureMovement {
+          position: Cesium.Cartesian2;
+        }
+
+        handler.setInputAction(
+          (movement: PickedFeatureMovement) => {
+            const silhouetteBlue = scene.postProcessStages.get(0) as SilhouetteBlueStage;
+            silhouetteBlue.selected = [];
+            const pickedFeature: any = scene.pick(movement.position);
+            if (silhouetteBlue.selected[0] === pickedFeature) {
+              return;
+            }
+            silhouetteBlue.selected = [pickedFeature];
+          },
+          ScreenSpaceEventType.LEFT_CLICK
+        );
+      } else {
+        console.warn('Silhouette for 3d objects is not supported');
+      }
+    },
+    flyTo: (destination: Cesium.Cartesian3, duration: number, orientation = { heading: 0, pitch: 0, roll: 0 }) => {
+      scene.camera.flyTo({
+        destination,
+        duration,
+        orientation
+      });
+    },
+    setView: (
+      destination: Cesium.Cartesian3,
+      orientation: { heading: number; pitch: number; roll: number }
+        ) => {
+      scene.camera.setView({
+        destination,
+        orientation
+      });
+    },
+    addSvgIcons: () => {
+      const svgIcons = `
+      <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+        <symbol viewBox="0 0 24 24" id="ic_cube_24px">
+          <path d="M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L6.04,7.5L12,10.85L17.96,7.5L12,4.15Z" />
+        </symbol>
+        <symbol viewBox="0 0 24 24" id="ic_clock-time-four_24px">
+          <path d="M12 2C6.5 2 2 6.5 2 12C2 17.5 6.5 22 12 22C17.5 22 22 17.5 22 12S17.5 2 12 2M16.3 15.2L11 12.3V7H12.5V11.4L17 13.9L16.3 15.2Z" />
+        </symbol>
+          <svg viewBox="0 0 24 24" id="ic_box-shadow_24px"><path d="M3,3H18V18H3V3M19,19H21V21H19V19M19,16H21V18H19V16M19,13H21V15H19V13M19,10H21V12H19V10M19,7H21V9H19V7M16,19H18V21H16V19M13,19H15V21H13V19M10,19H12V21H10V19M7,19H9V21H7V19Z" />
+        </symbol>
+      </svg>
+      `;
+      const div = document.createElement('div');
+      div.innerHTML = svgIcons;
+      document.body.insertBefore(div, document.body.childNodes[0]);
+    },
+    addControls: () => {
+      const cameraControlHtml = `
+        <div id="controlUI" style="
+          position: absolute;
+          bottom: 75px;
+          left: 17px;
+          z-index: 99;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+          font-size: 1rem;
+          font-weight: 400;
+          line-height: 1.5;
+          -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+          box-sizing: border-box;
+          background: rgba(255, 255, 255, 0.7);
+          border-radius: 4px;
+          display: inline-block;
+          padding: 3px;
+        ">
+          <div id="camera-controls" style="
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            border: 1px solid #424242;
+            border-radius: 4px;
+            color: #424242;
+          ">
+            <button id="cam-up" style="margin-bottom: -16px; background: none; border: none; cursor: pointer; padding: 4px;">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="hsl(0, 0%, 29%)" style="transform: rotate(-90deg);">
+                <use xlink:href="#ic_chevron_right_24px"></use>
+              </svg>
+            </button>
+            <div style="display: flex; gap: 8px;">
+              <button id="cam-left" style="background: none; border: none; cursor: pointer; padding: 4px;">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="hsl(0, 0%, 29%)" style="transform: rotate(180deg);">
+                  <use xlink:href="#ic_chevron_right_24px"></use>
+                </svg>
+              </button>
+              <button id="cam-right" style="background: none; border: none; cursor: pointer; padding: 4px;">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="hsl(0, 0%, 29%)">
+                  <use xlink:href="#ic_chevron_right_24px"></use>
+                </svg>
+              </button>
+            </div>
+            <button id="cam-down" style="margin-top: -16px; background: none; border: none; cursor: pointer; padding: 4px;">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="hsl(0, 0%, 29%)" style="transform: rotate(90deg);">
+                <use xlink:href="#ic_chevron_right_24px"></use>
+              </svg>
+            </button>
+          </div>
+        </div>
+      `;
+      const div = document.createElement('div');
+      div.innerHTML = cameraControlHtml;
+      document.body.insertBefore(div, document.body.childNodes[0]);
+    }
+  };
+
+  // 3D assets
+  const assets = {
+    // Terrain providers
+    terrainProviders: async () => {
+      if (cesiumTerrainProvider) {
+        terrain = await CesiumTerrainProvider.fromUrl(cesiumTerrainProvider, {
+          requestVertexNormals: true
+          // Add as option for 3D Tiles request
+          // requestWaterMask: true,
+        });
+        scene.terrainProvider = terrain;
+      } else if (cesiumIonassetIdTerrain && cesiumIontoken) {
+        terrain = await CesiumTerrainProvider.fromUrl(IonResource.fromAssetId(cesiumIonassetIdTerrain), {
+          requestVertexNormals: true
+          // Add as option for 3D Tiles request
+          // requestWaterMask: true,
+        });
+        scene.terrainProvider = terrain;
+      } else if (cesiumIontoken) {
+        // Cesium world terrain is used as default if token is present
+        terrain = await createWorldTerrainAsync({
+          requestVertexNormals: true
+        });
+        scene.terrainProvider = terrain;
+      }
+    },
+    // Cesium 3D Tile providers
+    cesium3DtilesProviders: () => {
+      add3DTile(scene, map, cesiumIontoken);
+    },
+    // GLTF providers
+    gltfProviders: () => {
+      if (gltf) {
+        gltf.forEach((gltfAsset) => {
+          const url = gltfAsset.url;
+          const lat = gltfAsset.lat;
+          const lng = gltfAsset.lng;
+          const height = gltfAsset.height;
+          const heightReference = gltfAsset.heightReference;
+          const animation = gltfAsset.animation;
+          addGLTF(scene, url, lat, lng, height, heightReference, animation);
+        });
+      }
+    }
+  };
+
+  const cesiumSettings = {
+    // Configure options for Scene
+    scene: () => {
+      // @ts-ignore: Ignore error if scene.clock is not writable
+      scene.clock = new Clock();
+      // Enables/disables atmosphere
+      if (scene.skyAtmosphere) {
+        scene.skyAtmosphere.show = !!settings.enableAtmosphere;
+      }
+      // Enables fog/disables
+      scene.fog.enabled = !!settings.enableFog;
+      // Shadow settings
+      const shadowSettings = settings.shadows;
+      const shadowMap = scene.shadowMap;
+      shadowMap.darkness = shadowSettings.darkness || false;
+      shadowMap.fadingEnabled = !!shadowSettings.fadingEnabled;
+      shadowMap.maximumDistance = shadowSettings.maximumDistance || false;
+      shadowMap.normalOffset = !!shadowSettings.normalOffset;
+      shadowMap.size = shadowSettings.size || false;
+      shadowMap.softShadows = !!shadowSettings.softShadows;
+
+      var viewModel = {
+        ambientOcclusionOnly: false,
+        intensity: 0.5,
+        bias: 0.1,
+        lengthCap: 100,
+        stepSize: 10.0,
+        blurStepSize: 2,
+      };
+      const ambientOcclusion = scene.postProcessStages.ambientOcclusion;
+      ambientOcclusion.enabled = true;
+
+      ambientOcclusion.uniforms.ambientOcclusionOnly = Boolean(
+        viewModel.ambientOcclusionOnly
+      );
+      ambientOcclusion.uniforms.intensity = Number(viewModel.intensity);
+      ambientOcclusion.uniforms.bias = Number(viewModel.bias);
+      ambientOcclusion.uniforms.lengthCap = (viewModel.lengthCap);
+      ambientOcclusion.uniforms.stepSize = Number(viewModel.stepSize);
+      ambientOcclusion.uniforms.blurStepSize = Number(viewModel.blurStepSize);
+    },
+    // Configure options for Globe
+    globe: () => {
+      const globe = scene.globe;
+      // Enables/disables depthTestAgainstTerrain
+      globe.depthTestAgainstTerrain = !!settings.depthTestAgainstTerrain;
+      // Enables/disables enableGroundAtmosphere
+      // globe.enableGroundAtmosphere = !!settings.showGroundAtmosphere;
+      // Options to set different skyboxes
+      if (settings.skyBox) {
+        const url = settings.skyBox.url;
+        scene.skyBox = new SkyBox({
+          sources: {
+            positiveX: `${url}${settings.skyBox.images.pX}`,
+            negativeX: `${url}${settings.skyBox.images.nX}`,
+            positiveY: `${url}${settings.skyBox.images.pY}`,
+            negativeY: `${url}${settings.skyBox.images.nY}`,
+            positiveZ: `${url}${settings.skyBox.images.pZ}`,
+            negativeZ: `${url}${settings.skyBox.images.nZ}`
+          }
+        });
+      }
+      settings.skyBox = false;
+    }
+  };
+
+  return Origo.ui.Component({
+    name: 'globe',
+    onAdd(evt: { target: any }) {
+      viewer = evt.target;
+      if (!target) target = `${viewer.getMain().getNavigation().getId()}`;
+      oGlobeTarget = viewer.getId();
+      map = viewer.getMap();
+      featureInfo = viewer.getControlByName('featureInfo');
+      // Init flatpickr to set the datetime in oGlobe.time
+      helpers.timeSetter();
+      // Init OLCesium
+      oGlobe = new window.OLCesium({
+        map,
+        target: oGlobeTarget,
+        time(): Cesium.JulianDate {
+          return JulianDate.fromDate(new Date((fp.element as HTMLInputElement).value));
+        }
+      });
+      // OLCesium needs to be global
+      window.oGlobe = oGlobe;
+      // Gets Scene
+      scene = oGlobe.getCesiumScene();
+      // setResolutionScale as configuration option
+      oGlobe.setResolutionScale(resolutionScale);
+
+      // scene.requestRender();
+      // Call the helpers
+      helpers.addControls();
+      helpers.addSvgIcons();
+      helpers.showGlobeOption();
+      helpers.cesiumCredits();
+      helpers.setActiveControls(oGlobe, viewer);
+      helpers.pickedFeatureStyle();
+      // Call the settings
+      Object.values(cesiumSettings).forEach((cesiumSetting: () => void) => cesiumSetting());
+      // Call the assets
+      Object.values(assets).forEach((asset: () => void) => asset());
+      // Infowindow i globe mode
+      getFeatureInfo(scene, viewer, map, featureInfo, helpers.flyTo);
+
+      const canvas: HTMLCanvasElement = scene.canvas;
+      const camera: Cesium.Camera = scene.camera;
+      
+      scene.globe.maximumScreenSpaceError = 4/3
+
+      function orbitAroundCamera(direction: 'left' | 'right' = 'left', angle: number = Cesium.Math.toRadians(2)): void {
+      const sign = direction === 'right' ? 1 : -1;
+      camera.setView({
+        destination: camera.positionWC,
+        orientation: {
+        heading: camera.heading + sign * angle,
+        pitch: camera.pitch,
+        roll: camera.roll
+        }
+      });
+      }
+
+      function orbitAroundCenter(direction: 'left' | 'right' = 'left', baseAngle: number = 0.05): void {
+      const screenCenter = new Cesium.Cartesian2(canvas.clientWidth / 2, canvas.clientHeight / 2);
+
+      // Try to pick a position on terrain or 3D tiles
+      let center = scene.pickPosition(screenCenter);
+      if (!Cesium.defined(center)) {
+        const ray = camera.getPickRay(screenCenter);
+        if (!ray) return;
+        const hit = Cesium.IntersectionTests.rayEllipsoid(ray, Cesium.Ellipsoid.WGS84);
+        if (!hit) return;
+        center = Cesium.Ray.getPoint(ray, hit.start);
+      }
+
+      // Get current position and direction
+      const cameraPosition = Cesium.Cartesian3.clone(camera.positionWC);
+      const directionVector = Cesium.Cartesian3.clone(camera.directionWC);
+      const upVector = Cesium.Cartesian3.clone(camera.upWC);
+
+      const angle = direction === 'right' ? baseAngle : -baseAngle;
+
+      // Get local ENU transform
+      const enuTransform = Cesium.Transforms.eastNorthUpToFixedFrame(center);
+      const inverse = Cesium.Matrix4.inverseTransformation(enuTransform, new Cesium.Matrix4());
+
+      // Convert camera position to local space
+      const localPos = Cesium.Matrix4.multiplyByPoint(inverse, cameraPosition, new Cesium.Cartesian3());
+      const localDir = Cesium.Matrix4.multiplyByPointAsVector(inverse, directionVector, new Cesium.Cartesian3());
+      const localUp = Cesium.Matrix4.multiplyByPointAsVector(inverse, upVector, new Cesium.Cartesian3());
+
+      // Rotate around local Z (up)
+      const rotMatrix = Cesium.Matrix3.fromRotationZ(angle);
+      const rotatedPos = Cesium.Matrix3.multiplyByVector(rotMatrix, localPos, new Cesium.Cartesian3());
+      const rotatedDir = Cesium.Matrix3.multiplyByVector(rotMatrix, localDir, new Cesium.Cartesian3());
+      const rotatedUp = Cesium.Matrix3.multiplyByVector(rotMatrix, localUp, new Cesium.Cartesian3());
+      const newPos = Cesium.Matrix4.multiplyByPoint(enuTransform, rotatedPos, new Cesium.Cartesian3());
+      const newDir = Cesium.Matrix4.multiplyByPointAsVector(enuTransform, rotatedDir, new Cesium.Cartesian3());
+      const newUp = Cesium.Matrix4.multiplyByPointAsVector(enuTransform, rotatedUp, new Cesium.Cartesian3());
+
+      camera.setView({
+        destination: newPos,
+        orientation: {
+        direction: Cesium.Cartesian3.normalize(newDir, new Cesium.Cartesian3()),
+        up: Cesium.Cartesian3.normalize(newUp, new Cesium.Cartesian3()),
+        },
+      });
+      }
+
+      // Camera movement buttons
+      (document.getElementById('cam-up') as HTMLElement).onclick = () => camera.lookUp(Cesium.Math.toRadians(3));
+      (document.getElementById('cam-down') as HTMLElement).onclick = () => camera.lookDown(Cesium.Math.toRadians(3));
+
+      (document.getElementById('cam-left') as HTMLElement).onclick = () => {
+      isStreetMode ? orbitAroundCamera('left') : orbitAroundCenter('left');
+      };
+
+      (document.getElementById('cam-right') as HTMLElement).onclick = () => {
+      isStreetMode ? orbitAroundCamera('right') : orbitAroundCenter('right');
+      };
+
+      this.on('render', this.onRender as () => void);
+      this.render();
+    },
+    onInit() {
+      globeEl = Origo.ui.Element({
+        tagName: 'div',
+        cls: 'flex column z-index-ontop-top-times20'
+      });
+
+      globeButton = Origo.ui.Button({
+        cls: 'o-globe padding-small margin-bottom-smaller icon-smaller round light box-shadow',
+        click() {
+          toggleGlobe();
+          toggleButtons();
+          helpers.setActiveControls(oGlobe, viewer);
+        },
+        icon: '#ic_cube_24px',
+        tooltipText: 'Globe',
+        tooltipPlacement: 'east'
+      });
+      buttons.push(globeButton);
+
+      flatpickrButton = Origo.ui.Button({
+        cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow hidden',
+        click() {
+          const el = document.getElementById(flatpickrButton.getId());
+          if (el) {
+            const active = el.classList.toggle('active');
+            active ? fp.open() : fp.close();
+          }
+        },
+        icon: '#ic_clock-time-four_24px',
+        tooltipText: 'Datetime picker',
+        tooltipPlacement: 'east'
+      });
+      buttons.push(flatpickrButton);
+
+      const quickTimeContainer = document.createElement('div');
+      quickTimeContainer.classList.add('quick-time-container', 'origo-popup', 'animate');
+      quickTimeContainer.style.display = 'none';
+      quickTimeContainer.style.position = 'absolute';
+      quickTimeContainer.style.zIndex = '9999';
+      quickTimeContainer.style.padding = '10px';
+      quickTimeContainer.style.background = '#fff';
+      quickTimeContainer.style.boxShadow = '0 2px 6px rgba(0,0,0,0.3)';
+      quickTimeContainer.style.borderRadius = '6px';
+      document.body.appendChild(quickTimeContainer);
+
+      // Fill it with the time buttons
+      const predefinedTimes = [
+        { date: '2025-03-20', label: '20 Mars' },
+        { date: '2025-06-21', label: '21 Juni' },
+        { date: '2025-09-22', label: '22 September' },
+        { date: '2025-09-23', label: '23 September' },
+        { date: '2025-12-21', label: '21 December' }
+      ];
+      const hours = [9, 12, 16];
+
+      predefinedTimes.forEach((dateObj) => {
+        const dateLabel = document.createElement('div');
+        dateLabel.innerText = dateObj.label;
+        dateLabel.style.fontWeight = 'bold';
+        quickTimeContainer.appendChild(dateLabel);
+
+        hours.forEach((hour) => {
+          const btn = document.createElement('button');
+          btn.innerText = `${hour}:00`;
+          btn.classList.add('quick-time-button', 'small');
+          btn.style.marginRight = '4px';
+          btn.addEventListener('click', () => {
+            const selectedDate = new Date(dateObj.date);
+            selectedDate.setHours(hour, 0, 0);
+            fp.setDate(selectedDate, true);
+            quickTimeContainer.style.display = 'none'; // Hide after click
+          });
+          quickTimeContainer.appendChild(btn);
+        });
+
+        const spacer = document.createElement('div');
+        spacer.style.marginBottom = '10px';
+        quickTimeContainer.appendChild(spacer);
+      });
+
+      quickTimePickerButton = Origo.ui.Button({
+        cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow quick-time-button',
+        click() {
+          const isVisible = quickTimeContainer.style.display === 'block';
+          quickTimeContainer.style.display = isVisible ? 'none' : 'block';
+          console.log(isVisible);
+      
+          if (!isVisible) {
+            const btnEl = document.getElementById(quickTimePickerButton.getId());
+            if (btnEl) {
+              const rect = btnEl.getBoundingClientRect();
+              quickTimeContainer.style.left = `${rect.right + 10}px`;
+              quickTimeContainer.style.top = `${rect.top}px`;
+            }
+          }
+        },
+        icon: '#ic_clock-time-four_24px',
+        tooltipText: 'Snabbval för tid',
+        tooltipPlacement: 'east'
+      });
+      buttons.push(quickTimePickerButton);
+
+      toggleShadowsButton = Origo.ui.Button({
+        cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow active',
+        click() {
+          const el = document.getElementById(toggleShadowsButton.getId());
+          if (el) {
+            const active = el.classList.toggle('active');
+            scene.shadowMap.enabled = active;
+          } else {
+            // Optionally handle the case when el is null
+            console.warn('toggleShadowsButton element not found');
+          }
+        },
+        icon: '#ic_box-shadow_24px',
+        tooltipText: 'Toggle shadows',
+        tooltipPlacement: 'east'
+      });
+      buttons.push(toggleShadowsButton);
+
+      toggleFXButton = Origo.ui.Button({
+        cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow active',
+        click() {
+          const el = document.getElementById(toggleFXButton.getId());
+          if (el) {
+            const active = el.classList.toggle('active');
+            scene.fog.enabled = active && !!settings.enableFog;
+            const shadowMap = scene.shadowMap;
+            const shadowSettings = settings.shadows;
+            shadowMap.fadingEnabled = active ? shadowSettings.fadingEnabled : false;
+            shadowMap.normalOffset = active ? shadowSettings.normalOffset : false;
+            shadowMap.size = active ? shadowSettings.size : 1024;
+            shadowMap.softShadows = active ? shadowSettings.softShadows : false;
+            scene.postProcessStages.ambientOcclusion.enabled = active;
+          }
+        },
+        icon: '#ic_cube_24px',
+        tooltipText: 'Toggle FX Settings',
+        tooltipPlacement: 'east'
+      });
+      buttons.push(toggleFXButton);
+    },
+    render() {
+
+      const globeElDomTar = document.getElementById(target ?? '');
+      if(globeElDomTar) {
+        htmlString = `${globeEl.render()}`;
+        el = Origo.ui.dom.html(htmlString);
+        globeElDomTar.appendChild(el);
+      }
+
+      const globeElDom = document.getElementById(globeEl.getId());
+      if (globeElDom) {
+
+        htmlString = globeButton.render();
+        el = Origo.ui.dom.html(htmlString);
+        globeElDom.appendChild(el);
+
+        htmlString = flatpickrButton.render();
+        el = Origo.ui.dom.html(htmlString);
+        globeElDom.appendChild(el);
+
+        htmlString = quickTimePickerButton.render();
+        el = Origo.ui.dom.html(htmlString);
+        globeElDom.appendChild(el);
+
+        htmlString = toggleShadowsButton.render();
+        el = Origo.ui.dom.html(htmlString);
+        globeElDom.appendChild(el);
+
+        htmlString = toggleFXButton.render();
+        el = Origo.ui.dom.html(htmlString);
+        globeElDom.appendChild(el);
+      }
+
+      helpers.activeGlobeOnStart();
+      this.dispatch('render');
+      scene.shadowMap.enabled = true
+
+    },
+    isGlobeActive() {
+      return isGlobeActive(oGlobe);
+    },
+    threedtiletype() {
+      return threedtile;
+    },
+    gltftype() {
+      return addGLTF;
+    },
+    globalOLCesium() {
+      return OLCesium
+    }
+  });
+};
