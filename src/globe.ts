@@ -134,6 +134,19 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       oGlobe.setEnabled(!isGlobeActive(oGlobe));
       const streetView = document.getElementById('streetView');
       const controlUI = document.getElementById('controlUI');
+      const oToolsBottom = document.getElementById('o-tools-bottom');
+      const oConsole = document.getElementById('o-console');
+      const oFooterMiddle = document.getElementsByClassName('o-footer-middle')[0] as HTMLElement;
+      if (oFooterMiddle) {
+        oFooterMiddle.style.paddingLeft = isGlobeActive(oGlobe) ? '5px' : '0px';
+      }
+      if (oToolsBottom) {
+        oToolsBottom.style.display = isGlobeActive(oGlobe) ? 'none' : 'flex';
+      }
+      if (oConsole) {
+        oConsole.style.display = isGlobeActive(oGlobe) ? 'none' : 'flex';
+      }
+
       if (streetView && controlUI) {
         streetView.style.display = !isGlobeActive(oGlobe) ? 'none' : 'flex';
         controlUI.style.display = !isGlobeActive(oGlobe) ? 'none' : 'flex';
@@ -163,7 +176,6 @@ const Globe = function Globe(options: GlobeOptions = {}) {
 
   const helpers = {
     activeGlobeOnStart: (): void => {
-      console.log('hej');
       if (globeOnStart) {
         toggleGlobe();
         toggleButtons();
@@ -237,8 +249,8 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         const streetViewHtml = `
         <div id="streetView" style="
           position: absolute;
-          bottom: 165px;
-          left: 17px;
+          bottom: 115px;
+          left: 10px;
           z-index: 100;
           cursor: pointer;
           background: rgba(255, 255, 255, 0.7);
@@ -295,8 +307,8 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       const cameraControlHtml = `
         <div id="controlUI" style="
           position: absolute;
-          bottom: 75px;
-          left: 17px;
+          bottom: 35px;
+          left: 10px;
           z-index: 99;
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
           font-size: 1rem;
