@@ -53,7 +53,7 @@ export default async function load3DLayers(
     const show = layer.get('filter') ?? undefined;
     const model = layer.get('model');
 
-    if (layer.constructor.name === 'ThreedTile' && extrusion) {
+    if (type === 'THREEDTILE' && extrusion) {
       const url = `${layer.get('dataSource')}?service=WFS&version=1.0.0&request=GetFeature&typeName=${layer.get('name')}&outputFormat=application/json&srsName=EPSG:4326`;
       try {
         const geojson = await (await fetch(url)).json();
@@ -117,7 +117,7 @@ export default async function load3DLayers(
         console.error('Error loading WFS extruded buildings:', err);
       }
 
-    } else if (layer.constructor.name === 'ThreedTile' && model) {
+    } else if (type === 'THREEDTILE' && model) {
       const url = `${layer.get('dataSource')}?service=WFS&version=1.0.0&request=GetFeature&typeName=${layer.get('name')}&outputFormat=application/json&srsName=EPSG:4326`;
       try {
         const response = await fetch(url);
@@ -179,7 +179,7 @@ export default async function load3DLayers(
         console.error('Error loading WFS GLTF layer:', err);
       }
 
-    } else if (layer.constructor.name === 'ThreedTile') {
+    } else if (type === 'THREEDTILE') {
       const url = layer.get('url');
       let layerTileset: Cesium3DTileset | undefined;
 
