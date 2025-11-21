@@ -1,7 +1,8 @@
 import { 
   Scene, ScreenSpaceEventHandler, ScreenSpaceEventType, Cartesian3, Cartesian2,
   Color, LabelCollection, Label, LabelStyle, VerticalOrigin,
-  Primitive, GeometryInstance, PolylineGeometry, ColorGeometryInstanceAttribute, HorizontalOrigin
+  Primitive, GeometryInstance, PolylineGeometry, ColorGeometryInstanceAttribute, HorizontalOrigin,
+  PolylineColorAppearance
 } from "cesium";
 import { setMeasuring } from './../globeState';
 
@@ -34,36 +35,31 @@ export default function measureTool(scene: Scene) {
     setMeasuring(true);
     clear();
 
+    let moving = false;
+
     interface ClickEvent {
-      position: Cartesian2;
+      position: { x: number; y: number };
     }
 
     handler.setInputAction((click: ClickEvent) => {
-      const cartesian2Pos: Cartesian2 = new Cartesian2(click.position.x, click.position.y);
-      
-      // const ray = scene.camera.getPickRay(cartesian2Pos);
-      // if (!ray) return;
-
-      const ray = scene.camera.getPickRay(cartesian2Pos);
-      let cartesian = scene.pickPosition(cartesian2Pos); // try picking from 3D Tiles first
+      const cartesian2Pos = new Cartesian2(click.position.x, click.position.y);
+      let cartesian: Cartesian3 | undefined = scene.pickPosition(cartesian2Pos);
       if (!cartesian) {
-          // fallback to terrain
-          if (!ray) return;
-          const picked = scene.globe.pick(ray, scene);
-          if (!picked) return;
-          cartesian = picked;
+      const ray = scene.camera.getPickRay(cartesian2Pos);
+      if (!ray) return;
+      cartesian = scene.globe.pick(ray, scene);
       }
       if (!cartesian) return;
 
       if (!start) {
       start = cartesian.clone();
+      moving = true;
       } else {
       end = cartesian.clone();
+      moving = false;
 
-      interface PolylineGeometryInstanceAttributes {
-        color: ColorGeometryInstanceAttribute;
-      }
-
+      // Finalize polyline
+      if (activePrimitive) scene.primitives.remove(activePrimitive);
       const instance: GeometryInstance = new GeometryInstance({
         geometry: new PolylineGeometry({
         positions: [start, end],
@@ -71,16 +67,15 @@ export default function measureTool(scene: Scene) {
         }),
         attributes: {
         color: ColorGeometryInstanceAttribute.fromColor(Color.YELLOW)
-        } as PolylineGeometryInstanceAttributes
+        }
       });
-
       activePrimitive = new Primitive({
         geometryInstances: [instance],
-        appearance: new (require("cesium").PolylineColorAppearance)({})
+        appearance: new PolylineColorAppearance({})
       });
-
       scene.primitives.add(activePrimitive);
 
+      // Add label
       const mid: Cartesian3 = Cartesian3.midpoint(start, end, new Cartesian3());
       const distance: number = Cartesian3.distance(start, end);
       activeLabel = labelCollection.add({
@@ -98,6 +93,60 @@ export default function measureTool(scene: Scene) {
       handler.removeInputAction(ScreenSpaceEventType.LEFT_CLICK);
       }
     }, ScreenSpaceEventType.LEFT_CLICK);
+
+    // Mouse move handler for dynamic line
+    interface MouseMoveEvent {
+      endPosition: { x: number; y: number };
+    }
+
+    handler.setInputAction((movement: MouseMoveEvent) => {
+      if (!start || !moving) return;
+
+      const cartesian2Pos = new Cartesian2(movement.endPosition.x, movement.endPosition.y);
+      let cartesian: Cartesian3 | undefined = scene.pickPosition(cartesian2Pos);
+      if (!cartesian) {
+      const ray = scene.camera.getPickRay(cartesian2Pos);
+      if (!ray) return;
+      cartesian = scene.globe.pick(ray, scene);
+      }
+      if (!cartesian) return;
+
+      // Update end point
+      end = cartesian.clone();
+
+      // Update primitive
+      if (activePrimitive) scene.primitives.remove(activePrimitive);
+      const instance: GeometryInstance = new GeometryInstance({
+      geometry: new PolylineGeometry({
+        positions: [start, end],
+        width: 2
+      }),
+      attributes: {
+        color: ColorGeometryInstanceAttribute.fromColor(Color.YELLOW)
+      }
+      });
+      activePrimitive = new Primitive({
+      geometryInstances: [instance],
+      appearance: new PolylineColorAppearance({})
+      });
+      scene.primitives.add(activePrimitive);
+
+      // Update label
+      if (activeLabel) labelCollection.remove(activeLabel);
+      const mid: Cartesian3 = Cartesian3.midpoint(start, end, new Cartesian3());
+      const distance: number = Cartesian3.distance(start, end);
+      activeLabel = labelCollection.add({
+      position: mid,
+      text: `${(distance / 1000).toFixed(2)} km`,
+      font: "14px sans-serif",
+      fillColor: Color.WHITE,
+      outlineColor: Color.BLACK,
+      outlineWidth: 2,
+      style: LabelStyle.FILL_AND_OUTLINE,
+      verticalOrigin: VerticalOrigin.BOTTOM,
+      horizontalOrigin: HorizontalOrigin.CENTER
+      });
+    }, ScreenSpaceEventType.MOUSE_MOVE);
   }
 
   function destroy() {
