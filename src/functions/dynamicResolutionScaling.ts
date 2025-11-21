@@ -18,7 +18,7 @@ export default function dynamicResolutionScaling(oGlobe: any, scene: Cesium.Scen
         mseLow: 8,
         lowDetailMinTime: 800,
         pointerMaxMs: 120,
-        idleRenderDelay: 500,
+        idleRenderDelay: 300,
         frameSkipThreshold: 42,
         lodThrottleMs: 50, // step 2: throttle LOD updates
     };
