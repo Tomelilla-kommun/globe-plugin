@@ -16,6 +16,7 @@ import {
   Clock,
 } from 'cesium';
 import isGlobeActive from './functions/isglobeactive';
+import measureTool from './functions/measureTool';
 import addGLTF from './layer/gltf';
 import add3DTile from './layer/threedtile';
 import { threedtile } from './layer/layerhelper';
@@ -23,6 +24,7 @@ import getFeatureInfo from './functions/featureinfo';
 import ViewShed from './functions/ViewShed';
 import StreetView from './functions/StreetView';
 import CameraControls from './functions/CameraControls';
+import dynamicResolutionScaling from './functions/dynamicResolutionScaling';
 import { setCameraHeight, getCameraHeight, setIsStreetMode, getIsStreetMode } from './globeState';
 
 declare global {
@@ -110,6 +112,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
   let terrain: Cesium.TerrainProvider;
   let featureInfo: any;
   let scene: Cesium.Scene;
+  let cesiumViewer: Cesium.Viewer;
   let fp: flatpickr.Instance;
 
   let globeEl: OrigoElement;
@@ -137,6 +140,11 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       const oToolsBottom = document.getElementById('o-tools-bottom');
       const oConsole = document.getElementById('o-console');
       const oFooterMiddle = document.getElementsByClassName('o-footer-middle')[0] as HTMLElement;
+      const oMeasure = document.getElementsByClassName('o-measure')[0] as HTMLElement;
+
+      // if (oMeasure) {
+      //   oMeasure.style.display = isGlobeActive(oGlobe) ? 'none' : 'flex';
+      // }
       if (oFooterMiddle) {
         oFooterMiddle.style.paddingLeft = isGlobeActive(oGlobe) ? '5px' : '0px';
       }
@@ -249,7 +257,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         const streetViewHtml = `
         <div id="streetView" style="
           position: absolute;
-          bottom: 115px;
+          bottom: 102px;
           left: 10px;
           z-index: 100;
           cursor: pointer;
@@ -329,24 +337,24 @@ const Globe = function Globe(options: GlobeOptions = {}) {
             border-radius: 4px;
             color: #424242;
           ">
-            <button id="cam-up" style="margin-bottom: -16px; background: none; border: none; cursor: pointer; padding: 4px;">
+            <button id="cam-up" style="margin-bottom: -17px; margin-top: -6px; background: none; border: none; cursor: pointer; padding: 4px;">
               <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(-90deg);">
                 <use xlink:href="#ic_chevron_right_24px"></use>
               </svg>
             </button>
-            <div style="display: flex; gap: 8px;">
-              <button id="cam-left" style="background: none; border: none; cursor: pointer; padding: 4px;">
+            <div style="display: flex; gap: 4px;">
+              <button id="cam-left" style="margin-left: -7px; background: none; border: none; cursor: pointer; padding: 4px;">
                 <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(180deg);">
                   <use xlink:href="#ic_chevron_right_24px"></use>
                 </svg>
               </button>
-              <button id="cam-right" style="background: none; border: none; cursor: pointer; padding: 4px;">
+              <button id="cam-right" style="margin-right: -6px; margin-left: -3px; background: none; border: none; cursor: pointer; padding: 4px;">
                 <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)">
                   <use xlink:href="#ic_chevron_right_24px"></use>
                 </svg>
               </button>
             </div>
-            <button id="cam-down" style="margin-top: -16px; background: none; border: none; cursor: pointer; padding: 4px;">
+            <button id="cam-down" style="margin-top: -19px; margin-bottom: -6px; background: none; border: none; cursor: pointer; padding: 4px;">
               <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(90deg);">
                 <use xlink:href="#ic_chevron_right_24px"></use>
               </svg>
@@ -360,26 +368,59 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     },
     pickedFeatureStyle: (): void => {
       const handler = new ScreenSpaceEventHandler(scene.canvas);
+
       if (PostProcessStageLibrary.isSilhouetteSupported(scene)) {
-        const silhouetteBlue = PostProcessStageLibrary.createEdgeDetectionStage();
-        silhouetteBlue.uniforms.color = Color.ROYALBLUE;
-        silhouetteBlue.uniforms.length = 0.01;
-        silhouetteBlue.selected = [];
-        scene.postProcessStages.add(PostProcessStageLibrary.createSilhouetteStage([silhouetteBlue]));
-        handler.setInputAction((movement: any) => {
-          silhouetteBlue.selected = [];
-          const pickedFeature = scene.pick(movement.position);
-          if (silhouetteBlue.selected[0] === pickedFeature) return;
-          silhouetteBlue.selected = [pickedFeature];
-        }, ScreenSpaceEventType.LEFT_CLICK);
+        const silhouette = PostProcessStageLibrary.createEdgeDetectionStage();
+        silhouette.uniforms.color = Color.ROYALBLUE;
+        silhouette.uniforms.length = 0.01;
+        silhouette.selected = [];
+
+        scene.postProcessStages.add(PostProcessStageLibrary.createSilhouetteStage([silhouette]));
+
+        let lastPickTime = 0;
+
+        handler.setInputAction(({ position }: { position: Cesium.Cartesian2 }) => {
+          const now = performance.now();
+          if (now - lastPickTime < 120) return;
+          lastPickTime = now;
+
+          // Only pick if position exists
+          if (position) {
+            const pickedFeature = scene.pick(position);
+            silhouette.selected = pickedFeature ? [pickedFeature] : [];
+          }
+        }, ScreenSpaceEventType.MOUSE_MOVE);
       }
     },
+    addMeasureTool: (scene: Cesium.Scene): void => {
+      let tool: ReturnType<typeof measureTool> | null = null;
+      const originalButton = document.getElementsByClassName('o-measure')[0] as HTMLElement;
+
+      // Clone the element to remove existing listeners
+      const newButton = originalButton.cloneNode(true) as HTMLElement;
+      originalButton.replaceWith(newButton);
+
+      // Add your own toggle behavior
+      newButton.addEventListener('click', () => {
+        if (!tool) {
+          // Start measuring
+          tool = measureTool(scene);
+          tool.measureDistance();
+          newButton.classList.add('active'); // optional visual highlight
+        } else {
+          // Clear/destroy measurement
+          tool.destroy();
+          tool = null;
+          newButton.classList.remove('active');
+        }
+      });
+    }
   };
 
   const assets = {
     terrainProviders: async (): Promise<void> => {
       if (cesiumTerrainProvider) {
-        terrain = await CesiumTerrainProvider.fromUrl(cesiumTerrainProvider, { requestVertexNormals: true});
+        terrain = await CesiumTerrainProvider.fromUrl(cesiumTerrainProvider, { requestVertexNormals: false});
         scene.terrainProvider = terrain;
       } else if (cesiumIonassetIdTerrain && cesiumIontoken) {
         terrain = await CesiumTerrainProvider.fromUrl(IonResource.fromAssetId(cesiumIonassetIdTerrain), { requestVertexNormals: true });
@@ -444,6 +485,9 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     // Configure options for Globe
     globe: () => {
       const globe = scene.globe;
+
+      // scene.requestRenderMode = true;
+
       // Enables/disables depthTestAgainstTerrain
       globe.depthTestAgainstTerrain = !!settings.depthTestAgainstTerrain;
       // Enables/disables enableGroundAtmosphere
@@ -489,7 +533,8 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       // Gets Scene
       scene = oGlobe.getCesiumScene();
       // setResolutionScale as configuration option
-      oGlobe.setResolutionScale(resolutionScale);
+      dynamicResolutionScaling(oGlobe, scene);
+      // oGlobe.setResolutionScale(resolutionScale);
 
       const handler = new ScreenSpaceEventHandler(scene.canvas);
 
@@ -501,6 +546,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       helpers.addSvgIcons();
       helpers.setActiveControls(oGlobe, viewer);
       helpers.pickedFeatureStyle();
+      helpers.addMeasureTool(scene);
 
       CameraControls(scene);
       getFeatureInfo(scene, viewer, map, featureInfo, helpers.flyTo);

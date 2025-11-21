@@ -1,6 +1,7 @@
 import Origo from 'Origo';
 import proj4 from 'proj4';
 import * as Cesium from 'cesium';
+import { getMeasuring } from './../globeState';
 
 /**
  * Handles feature info clicks in globe mode (Cesium + Origo integration)
@@ -36,6 +37,9 @@ export default function useGlobeFeatureInfo(
   handler.setInputAction((click: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
     const feature = scene.pick(click.position);
     const cartesian = scene.pickPosition(click.position);
+    if (getMeasuring()) {
+      return; // Do not show feature info when measuring
+    }
 
     if (cartesian) {
       const cartographic = Cesium.Cartographic.fromCartesian(cartesian);
@@ -129,7 +133,7 @@ export default function useGlobeFeatureInfo(
     }
     // Handle 2D vector features linked to Cesium primitives
     else if ((feature.primitive as any).olFeature) {
-      if (destination) flyTo(destination, 3, orientation);
+      // if (destination) flyTo(destination, 3, orientation);
       coordinate = (feature.primitive as any).olFeature.getGeometry().getCoordinates();
       const primitive = (feature.primitive as any).olFeature;
       const layer = (feature.primitive as any).olLayer;
