@@ -79,7 +79,7 @@ export default function measureTool(scene: Scene) {
         const instance = new GeometryInstance({
           geometry: new PolylineGeometry({
             positions: [start, end],
-            width: 2
+            width: 2,
           }),
           attributes: {
             color: ColorGeometryInstanceAttribute.fromColor(Color.YELLOW)
@@ -99,14 +99,15 @@ export default function measureTool(scene: Scene) {
         const distance = Cartesian3.distance(start, end);
         const label = labelCollection.add({
           position: mid,
-          text: `${(distance / 1000).toFixed(2)} km`,
-          font: "14px sans-serif",
+          text: `${(distance).toFixed(2)} m`,
+          font: "16px sans-serif",
           fillColor: Color.WHITE,
           outlineColor: Color.BLACK,
           outlineWidth: 2,
           style: LabelStyle.FILL_AND_OUTLINE,
           verticalOrigin: VerticalOrigin.BOTTOM,
-          horizontalOrigin: HorizontalOrigin.CENTER
+          horizontalOrigin: HorizontalOrigin.CENTER,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
         });
         labels.push(label);
         scene.requestRender();
@@ -160,14 +161,15 @@ export default function measureTool(scene: Scene) {
       const distance = Cartesian3.distance(start, end);
       activeLabel = labelCollection.add({
         position: mid,
-        text: `${(distance / 1000).toFixed(2)} km`,
-        font: "14px sans-serif",
+        text: `${(distance).toFixed(2)} m`,
+        font: "16px sans-serif",
         fillColor: Color.WHITE,
         outlineColor: Color.BLACK,
         outlineWidth: 2,
         style: LabelStyle.FILL_AND_OUTLINE,
         verticalOrigin: VerticalOrigin.BOTTOM,
-        horizontalOrigin: HorizontalOrigin.CENTER
+        horizontalOrigin: HorizontalOrigin.CENTER,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
       });
       scene.requestRender();
     }, ScreenSpaceEventType.MOUSE_MOVE);

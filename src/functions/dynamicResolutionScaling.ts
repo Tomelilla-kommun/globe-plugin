@@ -1,214 +1,304 @@
 import * as Cesium from "cesium";
 import WMSThrottler from "./WMSThrottler";
 
-export default function dynamicResolutionScaling(oGlobe: any, scene: Cesium.Scene) {
+type GlobeLike = {
+  setResolutionScale: (scale: number) => void;
+};
 
-    /* ------------------------------------------------------------------
-     * CONFIG
-     * ------------------------------------------------------------------ */
-    const cfg = {
-        minScale: 0.7,
-        maxScale: Math.min(1, window.devicePixelRatio),
-        checkInterval: 500,
-        fpsLogInterval: 5000,
-        maxFrameSamples: 30,
-        maxFrameTime: 50,
-        tiltThreshold: Cesium.Math.toRadians(1.5),
-        mseHigh: 3,
-        mseLow: 6,
-        lowDetailMinTime: 800,
-        pointerMaxMs: 100,
-        idleRenderDelay: 500,
-        frameSkipThreshold: 42,
-        lodThrottleMs: 300, // step 2: throttle LOD updates
-        
+interface State {
+  scale: number;
+  lastCheck: number;
+  lastFPSLog: number;
+  lastPitch: number;
+  lowDetailUntil: number;
+  renderIdleTimer: number | null;
+  ewmaFrameTime: number;
+  lastLodUpdate: number;
+  cameraMoving: boolean;
+  wmsThrottler?: WMSThrottler;
+  lastAppliedScale: number;
+  lastAppliedMSE: number;
+  lastFrameTs: number;
+  inLowDetailTilt: boolean;
+}
+
+export default function dynamicResolutionScaling(oGlobe: GlobeLike, scene: Cesium.Scene) {
+  // ---------------------------------------
+  // CONFIG
+  // ---------------------------------------
+  const dpr = Math.min(1, window.devicePixelRatio || 1);
+  const cfg = {
+    minScale: 0.7,
+    maxScale: dpr,
+    checkInterval: 500,
+    fpsLogInterval: 5000,
+    targetFPS: 30,
+    deadbandFPS: 5,
+    ewmaAlpha: 0.18,
+    maxFrameTime: 50,
+    tiltEnter: Cesium.Math.toRadians(1.8), 
+    tiltExit: Cesium.Math.toRadians(1.2), 
+    mseHigh: 3,
+    mseLow: 6,
+    lowDetailMinTime: 800,
+    idleRenderDelay: 500,
+    lodThrottleMs: 300,
+    debugLogs: false,
+    frustumFarCap: 2_000_000,
+    requestMaxActive: 50,
+    requestPerServerActive: 6,
+    requestMaxContinuous: 12,
+    requestPerServerContinuous: 4
+  };
+
+  // ---------------------------------------
+  // STATE
+  // ---------------------------------------
+  const nowTs = performance.now();
+  const state: State = {
+    scale: dpr,
+    lastCheck: nowTs,
+    lastFPSLog: nowTs,
+    lastPitch: scene.camera.pitch,
+    lowDetailUntil: 0,
+    renderIdleTimer: null,
+    ewmaFrameTime: 0,
+    lastLodUpdate: 0,
+    cameraMoving: false,
+    wmsThrottler: undefined,
+    lastAppliedScale: -1,
+    lastAppliedMSE: -1,
+    lastFrameTs: nowTs,
+    inLowDetailTilt: false
+  };
+
+  function applyResolutionScale(scale: number) {
+    if (state.lastAppliedScale !== scale) {
+      oGlobe.setResolutionScale(scale);
+      state.lastAppliedScale = scale;
+      if (scene.requestRenderMode) scene.requestRender();
+    }
+  }
+
+  function applyMSE(mse: number) {
+    if (state.lastAppliedMSE !== mse) {
+      scene.globe.maximumScreenSpaceError = mse;
+      state.lastAppliedMSE = mse;
+      if (scene.requestRenderMode) scene.requestRender();
+    }
+  }
+
+  applyResolutionScale(state.scale);
+
+  // ---------------------------------------
+  // LOW-END GPU DETECTION
+  // ---------------------------------------
+  function detectLowEndGPU(): boolean {
+    const canvas = scene.canvas;
+    const gl =
+      (canvas.getContext("webgl2", { preserveDrawingBuffer: false }) as WebGL2RenderingContext | null) ||
+      (canvas.getContext("webgl", { preserveDrawingBuffer: false }) as WebGLRenderingContext | null);
+
+    if (!gl) return true;
+
+    const onContextLost = (e: Event) => {
+      e.preventDefault?.();
+      console.warn("WebGL context lost");
     };
-    /* ------------------------------------------------------------------
-     * STATE
-     * ------------------------------------------------------------------ */
-    let state = {
-        scale: Math.min(1, window.devicePixelRatio),
-        lastFrame: performance.now(),
-        lastCheck: performance.now(),
-        lastFPSLog: performance.now(),
-        lastPitch: scene.camera.pitch,
-        lowDetailUntil: 0,
-        pointerBusy: false,
-        frameTimes: [] as number[],
-        frameTimeSum: 0,
-        renderIdleTimer: null as any,
-        skipNextFrame: false,
-        wmsQueue: [] as Function[],
-        wmsActive: 0,
-        lastWmsTime: 0,
-        lastLodUpdate: 0,          // step 2: throttle LOD
-        cameraMoving: false,        // step 1 & 4
-        wmsThrottler: undefined as undefined | WMSThrottler, // Added property
-    };
+    canvas.removeEventListener("webglcontextlost", onContextLost as EventListener);
+    canvas.addEventListener("webglcontextlost", onContextLost as EventListener, { passive: false });
 
-    oGlobe.setResolutionScale(state.scale);
+    const dbgInfo = gl.getExtension("WEBGL_debug_renderer_info");
+    const renderer = dbgInfo
+      ? String(gl.getParameter((dbgInfo as any).UNMASKED_RENDERER_WEBGL)).toLowerCase()
+      : "";
 
-    /* ------------------------------------------------------------------
-     * LOW-END GPU DETECTION
-     * ------------------------------------------------------------------ */
-    function detectLowEndGPU(): boolean {
-        const gl = scene.canvas.getContext("webgl2") || scene.canvas.getContext("webgl");
-        if (!gl) return true;
+    const lowEndKeywords = ["intel", "swiftshader", "llvmpipe", "mali", "adreno"];
+    const okKeywords = ["angle", "hd"]; // heuristics
 
-        const dbgInfo = gl.getExtension("WEBGL_debug_renderer_info");
-        const renderer = dbgInfo
-            ? gl.getParameter(dbgInfo.UNMASKED_RENDERER_WEBGL).toLowerCase()
-            : "";
+    return lowEndKeywords.some(k => renderer.includes(k)) && !okKeywords.some(k => renderer.includes(k));
+  }
 
-        // Known low-end indicators
-        const lowEndKeywords = [
-            "intel",        // old iGPUs
-            "swiftshader",  // CPU fallback
-            "llvmpipe",
-            "mali",
-            "adreno"
-        ];
+  const LOW_END = detectLowEndGPU();
+  if (LOW_END) {
+    cfg.minScale = 0.5;
+    cfg.maxFrameTime = 35;
+    cfg.tiltEnter = Cesium.Math.toRadians(2.2);
+    cfg.tiltExit = Cesium.Math.toRadians(1.4);
+    cfg.mseLow = 7;
+    cfg.mseHigh = 2;
+    cfg.idleRenderDelay = 300;
+    if (cfg.debugLogs) console.warn("Low-end GPU detected → enabling low-end mode.");
+  }
 
-        // Modern ANGLE / D3D translations are fine; don't count as low-end
-        // Exclude 'angle' and 'hd' from the low-end list
-        return lowEndKeywords.some(k => renderer.includes(k));
+  if (LOW_END) {
+    scene.highDynamicRange = false;
+  }
+
+  // ---------------------------------------
+  // ACTIVE / IDLE RENDER MODE
+  // ---------------------------------------
+  function enableContinuousRender() {
+    scene.requestRenderMode = false;
+    state.cameraMoving = true;
+
+    // Cesium.RequestScheduler.maximumRequests = cfg.requestMaxContinuous;
+    // Cesium.RequestScheduler.maximumRequestsPerServer = cfg.requestPerServerContinuous;
+
+    // applyResolutionScale(cfg.minScale);
+    
+    state.wmsThrottler?.pause?.();
+
+    if (state.renderIdleTimer !== null) {
+      clearTimeout(state.renderIdleTimer);
+      state.renderIdleTimer = null;
+    }
+  }
+
+  function scheduleIdle() {
+    if (state.renderIdleTimer !== null) {
+      clearTimeout(state.renderIdleTimer);
+      state.renderIdleTimer = null;
+    }
+    state.renderIdleTimer = window.setTimeout(() => {
+      scene.requestRenderMode = true;
+      state.cameraMoving = false;
+
+      Cesium.RequestScheduler.maximumRequests = cfg.requestMaxActive;
+      Cesium.RequestScheduler.maximumRequestsPerServer = cfg.requestPerServerActive;
+
+      applyResolutionScale(state.scale);
+      scene.requestRender();
+      state.wmsThrottler?.resume?.();
+
+      state.renderIdleTimer = null;
+    }, cfg.idleRenderDelay);
+  }
+
+  scene.camera.moveStart.addEventListener(enableContinuousRender);
+  scene.camera.moveEnd.addEventListener(scheduleIdle);
+  scene.requestRenderMode = true;
+
+  // ---------------------------------------
+  // RESOLUTION SCALING (EWMA)
+  // ---------------------------------------
+  function updateResolution(now: number) {
+    if (now - state.lastCheck < cfg.checkInterval || state.ewmaFrameTime <= 0) return;
+
+    const fps = 1000 / state.ewmaFrameTime;
+    const error = cfg.targetFPS - fps;
+    const k = 0.0015;
+
+    let step = -error * k;
+    step = Cesium.Math.clamp(step, -0.05, 0.05);
+
+    const lowerBand = cfg.targetFPS - cfg.deadbandFPS;
+    const upperBand = cfg.targetFPS + cfg.deadbandFPS;
+
+    let newScale = state.scale;
+    if (fps < lowerBand && state.scale > cfg.minScale) {
+      newScale = Math.max(cfg.minScale, state.scale + step);
+    } else if (fps > upperBand && state.scale < cfg.maxScale) {
+      newScale = Math.min(cfg.maxScale, state.scale + Math.abs(step));
     }
 
-    const LOW_END = detectLowEndGPU();
-    if (LOW_END) {
-        cfg.minScale = 0.5;
-        cfg.maxFrameTime = 35;
-        cfg.maxFrameSamples = 20;
-        cfg.tiltThreshold = Cesium.Math.toRadians(2.0);
-        cfg.mseLow = 7;
-        cfg.mseHigh = 2;
-        cfg.pointerMaxMs = 80;
-        cfg.idleRenderDelay = 300;
-        console.warn("⚠ Low-end GPU detected → enabling low-end mode.");
+    if (newScale !== state.scale) {
+      state.scale = newScale;
+      if (!state.cameraMoving) {
+        applyResolutionScale(state.scale);
+      }
     }
 
-    /* ------------------------------------------------------------------
-     * ACTIVE / IDLE RENDER MODE + camera movement tracking
-     * ------------------------------------------------------------------ */
-    function enableContinuousRender() {
-        scene.requestRenderMode = false;
-        clearTimeout(state.renderIdleTimer);
-        state.cameraMoving = true;
-
-        // Step 1: temporarily reduce resolution & pause WMS
-        oGlobe.setResolutionScale(cfg.minScale);
-        // state.wmsThrottler?.pause?.();
+    console.log(`FPS=${fps.toFixed(1)} scale=${state.scale.toFixed(3)} step=${step.toFixed(4)}`);
+    if (cfg.debugLogs && now - state.lastFPSLog >= cfg.fpsLogInterval) {
+    //   console.log(`FPS=${fps.toFixed(1)} scale=${state.scale.toFixed(3)} step=${step.toFixed(4)}`);
+      state.lastFPSLog = now;
     }
 
-    function scheduleIdle() {
-        clearTimeout(state.renderIdleTimer);
-        state.renderIdleTimer = setTimeout(() => {
-            scene.requestRenderMode = true;
-            scene.requestRender();
-            state.cameraMoving = false;
+    state.lastCheck = now;
+  }
 
-            // Step 1: restore resolution & resume WMS
-            oGlobe.setResolutionScale(state.scale);
-            // state.wmsThrottler?.resume?.();
-        }, cfg.idleRenderDelay);
+  // ---------------------------------------
+  // TERRAIN LOD (tilt-based with throttle + hysteresis)
+  // ---------------------------------------
+  let enterFrames = 0;
+  function updateTerrainLOD(now: number) {
+    if (now - state.lastLodUpdate < cfg.lodThrottleMs) return;
+    state.lastLodUpdate = now;
+
+    const pitch = scene.camera.pitch;
+    const tilt = -pitch + Cesium.Math.PI_OVER_TWO;
+    const delta = Math.abs(pitch - state.lastPitch);
+    state.lastPitch = pitch;
+
+    const movedSignificantly = delta > Cesium.Math.toRadians(3);
+    const enterTilt = cfg.tiltEnter;
+    const exitTilt = cfg.tiltExit;
+
+    // Enter low detail when tilted above enter threshold and camera is moving
+    if (!state.inLowDetailTilt && tilt > enterTilt && movedSignificantly) {
+      if (++enterFrames >= 2) {
+        applyMSE(cfg.mseLow);
+        state.inLowDetailTilt = true;
+        state.lowDetailUntil = now + cfg.lowDetailMinTime;
+        enterFrames = 0;
+        return;
+      }
+    } else {
+      enterFrames = 0;
     }
 
-    scene.camera.moveStart.addEventListener(enableContinuousRender);
-    scene.camera.moveEnd.addEventListener(scheduleIdle);
-    scene.requestRenderMode = true;
+    // Leave low detail when tilt drops below exit threshold and min time elapsed
+    if (state.inLowDetailTilt && tilt < exitTilt && now >= state.lowDetailUntil) {
+      applyMSE(cfg.mseHigh);
+      state.inLowDetailTilt = false;
+    }
+  }
 
-    /* ------------------------------------------------------------------
-     * RESOLUTION SCALING (running sum)
-     * ------------------------------------------------------------------ */
-    function updateResolution(now: number) {
-        if (now - state.lastCheck < cfg.checkInterval || state.frameTimes.length === 0) return;
+  // ---------------------------------------
+  // MAIN FRAME LOOP (postRender)
+  // ---------------------------------------
+  const onPostRender = () => {
+    const now = performance.now();
 
-        const avg = state.frameTimeSum / state.frameTimes.length;
-        const fps = 1000 / avg;
+    if (!state.cameraMoving && scene.requestRenderMode) {
+      updateTerrainLOD(now);
+      state.lastFrameTs = now;
+      return;
+    }
 
-        if (fps < 25 && state.scale > cfg.minScale) {
-            state.scale = Math.max(cfg.minScale, state.scale - 0.05);
-            if (!state.cameraMoving) oGlobe.setResolutionScale(state.scale);
-        } else if (fps > 55 && state.scale < cfg.maxScale) {
-            state.scale = Math.min(cfg.maxScale, state.scale + 0.05);
-            if (!state.cameraMoving) oGlobe.setResolutionScale(state.scale);
+    const delta = now - state.lastFrameTs;
+    state.lastFrameTs = now;
+    if (delta > 0 && delta < cfg.maxFrameTime) {
+      const a = cfg.ewmaAlpha;
+      state.ewmaFrameTime = state.ewmaFrameTime > 0 ? (a * delta + (1 - a) * state.ewmaFrameTime) : delta;
+    }
+
+    updateResolution(now);
+    updateTerrainLOD(now);
+  };
+
+  scene.postRender.addEventListener(onPostRender);
+
+  // ---------------------------------------
+  // OPTIONAL: expose a dispose function
+  // ---------------------------------------
+  return {
+    dispose() {
+      try {
+        scene.camera.moveStart.removeEventListener(enableContinuousRender);
+        scene.camera.moveEnd.removeEventListener(scheduleIdle);
+        scene.postRender.removeEventListener(onPostRender);
+        if (state.renderIdleTimer !== null) {
+          clearTimeout(state.renderIdleTimer);
         }
 
-        if (now - state.lastFPSLog >= cfg.fpsLogInterval) {
-            console.log(`FPS=${fps.toFixed(1)} scale=${state.scale}`);
-            state.lastFPSLog = now;
-        }
-
-        state.lastCheck = now;
+        Cesium.RequestScheduler.maximumRequests = cfg.requestMaxActive;
+        Cesium.RequestScheduler.maximumRequestsPerServer = cfg.requestPerServerActive;
+        applyResolutionScale(dpr);
+        applyMSE(cfg.mseHigh);
+      } catch {
+      }
     }
-
-    /* ------------------------------------------------------------------
-     * TERRAIN LOD (tilt-based with throttle)
-     * ------------------------------------------------------------------ */
-    let consecutiveTiltFrames = 0;
-    function updateTerrainLOD(now: number) {
-        if (now - state.lastLodUpdate < cfg.lodThrottleMs) return;
-        state.lastLodUpdate = now;
-
-        const pitch = scene.camera.pitch;
-        const delta = Math.abs(pitch - state.lastPitch);
-        state.lastPitch = pitch;
-
-        if (delta > cfg.tiltThreshold) {
-            consecutiveTiltFrames++;
-            if (consecutiveTiltFrames >= 3) {
-                scene.globe.maximumScreenSpaceError = cfg.mseLow;
-                state.lowDetailUntil = now + cfg.lowDetailMinTime;
-                state.skipNextFrame = true;
-            }
-            return;
-        } else {
-            consecutiveTiltFrames = 0;
-        }
-
-        if (now < state.lowDetailUntil) return;
-        scene.globe.maximumScreenSpaceError = cfg.mseHigh;
-    }
-
-    /* ------------------------------------------------------------------
-     * MAIN FRAME LOOP (postRender, skip if camera stationary)
-     * ------------------------------------------------------------------ */
-    scene.postRender.addEventListener(() => {
-        const now = performance.now();
-        const delta = now - state.lastFrame;
-        state.lastFrame = now;
-
-        if (state.skipNextFrame) {
-            state.skipNextFrame = false;
-            return;
-        }
-
-        // step 4: skip frame logic if camera not moving
-        if (!state.cameraMoving && delta > cfg.frameSkipThreshold) return;
-
-        if (delta < cfg.maxFrameTime) {
-            state.frameTimes.push(delta);
-            state.frameTimeSum += delta;
-            if (state.frameTimes.length > cfg.maxFrameSamples) {
-                state.frameTimeSum -= state.frameTimes.shift()!;
-            }
-        }
-
-        updateResolution(now);
-        updateTerrainLOD(now);
-    });
-
-    /* ------------------------------------------------------------------
-     * POINTER THROTTLING (requestAnimationFrame)
-     * ------------------------------------------------------------------ */
-    // let pointerPending = false;
-    // scene.canvas.addEventListener("pointermove", () => {
-    //     if (pointerPending) return;
-    //     pointerPending = true;
-
-    //     requestAnimationFrame(() => {
-    //         // Place your pointer logic here
-    //         pointerPending = false;
-    //     });
-    // });
+  };
 }

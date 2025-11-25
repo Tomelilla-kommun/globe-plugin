@@ -25,6 +25,7 @@ import ViewShed from './functions/ViewShed';
 import StreetView from './functions/StreetView';
 import CameraControls from './functions/CameraControls';
 import dynamicResolutionScaling from './functions/dynamicResolutionScaling';
+import patchCollections from './functions/patchCollections';
 import { setCameraHeight, getCameraHeight, setIsStreetMode, getIsStreetMode } from './globeState';
 
 declare global {
@@ -534,7 +535,8 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       scene = oGlobe.getCesiumScene();
       // setResolutionScale as configuration option
       dynamicResolutionScaling(oGlobe, scene);
-      // oGlobe.setResolutionScale(resolutionScale);
+
+      scene.postRender.addEventListener(() => patchCollections(scene));
 
       const handler = new ScreenSpaceEventHandler(scene.canvas);
 
@@ -757,6 +759,8 @@ const Globe = function Globe(options: GlobeOptions = {}) {
 
       helpers.activeGlobeOnStart();
       this.dispatch('render');
+
+      // forceNoDepthTestForIconsAndText(scene);
 
     },
     isGlobeActive: (): boolean => isGlobeActive(oGlobe),
