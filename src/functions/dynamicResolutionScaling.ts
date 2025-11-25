@@ -7,26 +7,27 @@ export default function dynamicResolutionScaling(oGlobe: any, scene: Cesium.Scen
      * CONFIG
      * ------------------------------------------------------------------ */
     const cfg = {
-        minScale: 0.5,
+        minScale: 0.7,
         maxScale: Math.min(1, window.devicePixelRatio),
         checkInterval: 500,
         fpsLogInterval: 5000,
         maxFrameSamples: 30,
         maxFrameTime: 50,
         tiltThreshold: Cesium.Math.toRadians(1.5),
-        mseHigh: 0,
-        mseLow: 8,
+        mseHigh: 3,
+        mseLow: 6,
         lowDetailMinTime: 800,
-        pointerMaxMs: 120,
-        idleRenderDelay: 300,
+        pointerMaxMs: 100,
+        idleRenderDelay: 500,
         frameSkipThreshold: 42,
-        lodThrottleMs: 50, // step 2: throttle LOD updates
+        lodThrottleMs: 300, // step 2: throttle LOD updates
+        
     };
     /* ------------------------------------------------------------------
      * STATE
      * ------------------------------------------------------------------ */
     let state = {
-        scale: 0.9,
+        scale: Math.min(1, window.devicePixelRatio),
         lastFrame: performance.now(),
         lastCheck: performance.now(),
         lastFPSLog: performance.now(),
@@ -76,11 +77,10 @@ export default function dynamicResolutionScaling(oGlobe: any, scene: Cesium.Scen
     const LOW_END = detectLowEndGPU();
     if (LOW_END) {
         cfg.minScale = 0.5;
-        // cfg.maxScale = Math.min(0.9, window.devicePixelRatio);
         cfg.maxFrameTime = 35;
         cfg.maxFrameSamples = 20;
         cfg.tiltThreshold = Cesium.Math.toRadians(2.0);
-        cfg.mseLow = 10;
+        cfg.mseLow = 7;
         cfg.mseHigh = 2;
         cfg.pointerMaxMs = 80;
         cfg.idleRenderDelay = 300;
@@ -97,7 +97,7 @@ export default function dynamicResolutionScaling(oGlobe: any, scene: Cesium.Scen
 
         // Step 1: temporarily reduce resolution & pause WMS
         oGlobe.setResolutionScale(cfg.minScale);
-        state.wmsThrottler?.pause?.();
+        // state.wmsThrottler?.pause?.();
     }
 
     function scheduleIdle() {
@@ -109,7 +109,7 @@ export default function dynamicResolutionScaling(oGlobe: any, scene: Cesium.Scen
 
             // Step 1: restore resolution & resume WMS
             oGlobe.setResolutionScale(state.scale);
-            state.wmsThrottler?.resume?.();
+            // state.wmsThrottler?.resume?.();
         }, cfg.idleRenderDelay);
     }
 
@@ -145,8 +145,9 @@ export default function dynamicResolutionScaling(oGlobe: any, scene: Cesium.Scen
     /* ------------------------------------------------------------------
      * TERRAIN LOD (tilt-based with throttle)
      * ------------------------------------------------------------------ */
+    let consecutiveTiltFrames = 0;
     function updateTerrainLOD(now: number) {
-        if (now - state.lastLodUpdate < cfg.lodThrottleMs) return; // step 2
+        if (now - state.lastLodUpdate < cfg.lodThrottleMs) return;
         state.lastLodUpdate = now;
 
         const pitch = scene.camera.pitch;
@@ -154,10 +155,15 @@ export default function dynamicResolutionScaling(oGlobe: any, scene: Cesium.Scen
         state.lastPitch = pitch;
 
         if (delta > cfg.tiltThreshold) {
-            scene.globe.maximumScreenSpaceError = cfg.mseLow;
-            state.lowDetailUntil = now + cfg.lowDetailMinTime;
-            state.skipNextFrame = true;
+            consecutiveTiltFrames++;
+            if (consecutiveTiltFrames >= 3) {
+                scene.globe.maximumScreenSpaceError = cfg.mseLow;
+                state.lowDetailUntil = now + cfg.lowDetailMinTime;
+                state.skipNextFrame = true;
+            }
             return;
+        } else {
+            consecutiveTiltFrames = 0;
         }
 
         if (now < state.lowDetailUntil) return;
@@ -195,14 +201,14 @@ export default function dynamicResolutionScaling(oGlobe: any, scene: Cesium.Scen
     /* ------------------------------------------------------------------
      * POINTER THROTTLING (requestAnimationFrame)
      * ------------------------------------------------------------------ */
-    let pointerPending = false;
-    scene.canvas.addEventListener("pointermove", () => {
-        if (pointerPending) return;
-        pointerPending = true;
+    // let pointerPending = false;
+    // scene.canvas.addEventListener("pointermove", () => {
+    //     if (pointerPending) return;
+    //     pointerPending = true;
 
-        requestAnimationFrame(() => {
-            // Place your pointer logic here
-            pointerPending = false;
-        });
-    });
+    //     requestAnimationFrame(() => {
+    //         // Place your pointer logic here
+    //         pointerPending = false;
+    //     });
+    // });
 }

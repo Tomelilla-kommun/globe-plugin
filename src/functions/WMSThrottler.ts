@@ -10,12 +10,12 @@ export default class WMSThrottler {
     private activeCount = 0;
     private maxConcurrent: number;
     private paused = false;
+    private _resumeTimer: any = null;
 
     constructor(maxConcurrent: number = 5) {
         this.maxConcurrent = maxConcurrent;
     }
 
-    /** Add a WMS request to the queue */
     request(url: string, params?: Record<string, string>): Promise<HTMLImageElement> {
         return new Promise((resolve, reject) => {
             this.queue.push({ url, params, resolve, reject });
@@ -23,24 +23,27 @@ export default class WMSThrottler {
         });
     }
 
-    /** Pause processing (e.g., while camera moves) */
     pause() {
         this.paused = true;
+        clearTimeout(this._resumeTimer);
     }
 
-    /** Resume processing */
     resume() {
         this.paused = false;
         this.processQueue();
     }
 
-    /** Cancel all queued requests (optional) */
+    // NEW: Debounced resume
+    resumeAfter(ms: number) {
+        clearTimeout(this._resumeTimer);
+        this._resumeTimer = setTimeout(() => this.resume(), ms);
+    }
+
     cancelAll() {
         this.queue.forEach(req => req.reject(new Error("Cancelled")));
         this.queue = [];
     }
 
-    /** Internal queue processor */
     private processQueue() {
         if (this.paused) return;
         while (this.activeCount < this.maxConcurrent && this.queue.length > 0) {
@@ -54,7 +57,6 @@ export default class WMSThrottler {
         }
     }
 
-    /** Internal fetch handler */
     private fetchWMS(req: WMSRequest): Promise<void> {
         return new Promise((resolve) => {
             const img = new Image();
@@ -65,12 +67,10 @@ export default class WMSThrottler {
             }
             img.crossOrigin = "anonymous";
             img.onload = () => {
-                req.resolve(img);
-                resolve();
+                req.resolve(img); resolve();
             };
             img.onerror = (err) => {
-                req.reject(err);
-                resolve();
+                req.reject(err); resolve();
             };
             img.src = url;
         });

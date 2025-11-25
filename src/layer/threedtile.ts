@@ -199,6 +199,7 @@ export default async function load3DLayers(
           layerTileset = await Cesium3DTileset.fromUrl(url, {
             maximumScreenSpaceError: layer.get('maximumScreenSpaceError'),
             dynamicScreenSpaceError: true,
+            // preloadFlightDestinations: true,
             show: layer.get('visible')
           });
         }
