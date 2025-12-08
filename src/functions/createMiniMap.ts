@@ -175,22 +175,44 @@ miniView.on('change:center', () => {
   let mounted = false;
   let rafId: number | null = null;
 
-  function applyContainerStyle() {
-    Object.assign(containerDiv.style, {
-      position: 'absolute',
-      left: '130px',
-      bottom: '40px',
-      width: '300px',
-      height: '200px',
-      zIndex: '9999',
-      background: 'rgba(255,255,255,0.8)',
-      borderRadius: '8px',
-      boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
-      padding: '0',
-      overflow: 'hidden',
-      display: 'block',
-    });
-  }
+function applyContainerStyle() {
+    const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    if (isMobile) {
+        Object.assign(containerDiv.style, {
+            position: 'absolute',
+            top: '',
+            right: '0px',
+            left: '',
+            bottom: '25px',
+            width: '100vw',
+            height: '30vh',
+            zIndex: '10',
+            background: 'rgba(255,255,255,0.8)',
+            borderRadius: '',
+            boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+            padding: '0',
+            overflow: 'hidden',
+            display: 'block',
+        });
+    } else {
+        Object.assign(containerDiv.style, {
+            position: 'absolute',
+            left: '5px',
+            bottom: '35px',
+            top: '',
+            right: '',
+            width: '35vw',
+            height: '30vh',
+            zIndex: '10',
+            background: 'rgba(255,255,255,0.8)',
+            borderRadius: '8px',
+            boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+            padding: '0',
+            overflow: 'hidden',
+            display: 'block',
+        });
+    }
+}
 
   function mount() {
     if (mounted) return;
