@@ -12,6 +12,54 @@ import Style from 'ol/style/Style';
 import CircleStyle from 'ol/style/Circle';
 import Fill from 'ol/style/Fill';
 import { defaults as defaultInteractions } from 'ol/interaction';
+import Polygon from 'ol/geom/Polygon';
+import Stroke from 'ol/style/Stroke';
+import TileWMS from 'ol/source/TileWMS';
+
+// Helper to create cone coordinates
+function getConeCoordinates(camera: Cesium.Camera, distance = 1000, angleDeg = 60) {
+  // Step 1: pick a point in front of the camera
+  const forward = Cesium.Cartesian3.add(
+    camera.position,
+    Cesium.Cartesian3.multiplyByScalar(camera.direction, distance, new Cesium.Cartesian3()),
+    new Cesium.Cartesian3()
+  );
+
+  // Step 2: convert both center and forward point to lon/lat
+  const centerCarto = Cesium.Cartographic.fromCartesian(camera.position);
+  const forwardCarto = Cesium.Cartographic.fromCartesian(forward);
+
+  const centerLonLat: [number, number] = [
+    Cesium.Math.toDegrees(centerCarto.longitude),
+    Cesium.Math.toDegrees(centerCarto.latitude),
+  ];
+  const forwardLonLat: [number, number] = [
+    Cesium.Math.toDegrees(forwardCarto.longitude),
+    Cesium.Math.toDegrees(forwardCarto.latitude),
+  ];
+
+  // Step 3: convert to map coordinates
+  const c = fromLonLat(centerLonLat);
+  const f = fromLonLat(forwardLonLat);
+
+  // Step 4: compute heading in 2D
+  const heading = Math.atan2(f[1] - c[1], f[0] - c[0]);
+  const halfAngle = Cesium.Math.toRadians(angleDeg / 2);
+
+  // Step 5: left/right cone points
+  const leftX = c[0] + distance * Math.cos(heading - halfAngle);
+  const leftY = c[1] + distance * Math.sin(heading - halfAngle);
+
+  const rightX = c[0] + distance * Math.cos(heading + halfAngle);
+  const rightY = c[1] + distance * Math.sin(heading + halfAngle);
+
+  return [[
+    c,
+    [leftX, leftY],
+    [rightX, rightY],
+    c
+  ]];
+}
 
 type Globe = {
   getOlMap: () => Map;
@@ -38,9 +86,25 @@ export function createMiniMap(globe: Globe, containerDiv: HTMLDivElement) {
     rotation: 0,
   });
 
+  
+// https://kartor.tomelilla.se/geoserver/webservices/wms?REQUEST=GetMap&SERVICE=WMS&VERSION=1.1.1&FORMAT=image%2Fpng&STYLES=&TRANSPARENT=true&LAYERS=webservices%3Atopowebbkartan&TILED=true&WIDTH=256&HEIGHT=256&SRS=EPSG%3A3008&BBOX=169827.1250
   const miniMap = new Map({
     target: undefined,
-    layers: [new TileLayer({ source: new OSM() })],
+    layers: [
+        new TileLayer({
+            source: new TileWMS({
+            url: 'https://kartor.tomelilla.se/geoserver/webservices/ows',
+            params: {
+                LAYERS: 'webservices:topowebbkartan',
+                FORMAT: 'image/jpeg',
+                // TRANSPARENT: false,
+                VERSION: '1.1.1',
+            },
+            serverType: 'geoserver',
+            crossOrigin: 'anonymous',
+            })
+        })
+    ],
     view: miniView,
     controls: [],
         interactions: defaultInteractions({ 
@@ -77,6 +141,31 @@ const centerLayer = new VectorLayer({
 
 // Add to the minimap
 miniMap.addLayer(centerLayer);
+
+// Create the feature
+const coneFeature = new Feature({
+  geometry: new Polygon(getConeCoordinates(camera))
+});
+
+// Style it
+const coneLayer = new VectorLayer({
+  source: new VectorSource({ features: [coneFeature] }),
+  style: new Style({
+    stroke: new Stroke({ color: 'rgba(126, 92, 92, 0.49)', width: 2 }),
+    fill: new Fill({ color: 'rgba(155, 61, 61, 0.36)' })
+  })
+});
+
+// Add to minimap
+miniMap.addLayer(coneLayer);
+
+// Update cone on camera move
+const updateCone = () => {
+  const coords = getConeCoordinates(camera);
+  (coneFeature.getGeometry() as Polygon).setCoordinates(coords);
+};
+
+scene.preRender.addEventListener(updateCone);
 
 // Update the dot when minimap center changes
 miniView.on('change:center', () => {
