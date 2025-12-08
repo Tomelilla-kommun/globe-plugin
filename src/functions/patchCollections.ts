@@ -2,7 +2,7 @@ import * as Cesium from 'cesium';
 import type { Scene } from 'cesium';
 
 const ON_TOP = Number.POSITIVE_INFINITY; // fully disables depth testing for sprites
-const eye = new Cesium.Cartesian3(0, 0, -1.0e6); // optional nudge toward camera
+// const eye = new Cesium.Cartesian3(0, 0, -1.0e6); // optional nudge toward camera
 
 function patchBillboards(bc: Cesium.BillboardCollection) {
   for (let i = 0; i < bc.length; i++) {

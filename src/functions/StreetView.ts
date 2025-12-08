@@ -1,5 +1,13 @@
 import * as Cesium from 'cesium';
 import { getCameraHeight, getIsStreetMode, setIsStreetMode, setCameraHeight } from '../globeState';
+import { createMiniMap } from './createMiniMap';
+
+const bottomrightDiv = document.createElement('div');
+bottomrightDiv.id = 'mini-map-div';
+document.body.appendChild(bottomrightDiv);
+
+let miniMapController: (ReturnType<typeof createMiniMap> & { destroy: () => void }) | null = null;
+
 
 type CleanupFn = () => void;
 
@@ -23,7 +31,8 @@ const moveFlags = Object.fromEntries(
 
 export default async function setupStreetMode(
   scene: Cesium.Scene,
-  handler: Cesium.ScreenSpaceEventHandler
+  handler: Cesium.ScreenSpaceEventHandler,
+  globe: any
 ): Promise<void> {
   const heightPanel = document.getElementById('height-controls') as HTMLDivElement | null;
   const streetBtn = document.getElementById('street-mode-toggle') as HTMLButtonElement | null;
@@ -109,6 +118,9 @@ export default async function setupStreetMode(
 
   /** Start street mode at a given position */
   const enterStreetMode = (position: Cesium.Cartesian3) => {
+    miniMapController = createMiniMap(globe, bottomrightDiv);
+    miniMapController.mount();
+    
     const carto = Cesium.Cartographic.fromCartesian(position);
     carto.height += getCameraHeight();
 
@@ -187,6 +199,12 @@ export default async function setupStreetMode(
   /** Exit street mode cleanly */
   const exitStreetMode = () => {
     if (!getIsStreetMode()) return;
+
+      try {
+      miniMapController?.destroy();
+    } finally {
+      miniMapController = null;
+    }
 
     streetModeCleanup?.();
     streetModeCleanup = null;

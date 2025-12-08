@@ -113,7 +113,6 @@ const Globe = function Globe(options: GlobeOptions = {}) {
   let terrain: Cesium.TerrainProvider;
   let featureInfo: any;
   let scene: Cesium.Scene;
-  let cesiumViewer: Cesium.Viewer;
   let fp: flatpickr.Instance;
 
   let globeEl: OrigoElement;
@@ -253,7 +252,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       div.innerHTML = svgIcons;
       document.body.insertBefore(div, document.body.childNodes[0]);
     },
-    addStreetView:(streetView: boolean, handler: Cesium.ScreenSpaceEventHandler) => {
+    addStreetView:(streetView: boolean, handler: Cesium.ScreenSpaceEventHandler, globe: any) => {
       if (streetView) {
         const streetViewHtml = `
         <div id="streetView" style="
@@ -304,11 +303,11 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         const div = document.createElement('div');
         div.innerHTML = streetViewHtml;
         document.body.insertBefore(div, document.body.childNodes[0]);
-        StreetView(scene, handler);
+        StreetView(scene, handler, globe);
       }
     },
     addViewShed:(viewShed: boolean, handler: Cesium.ScreenSpaceEventHandler) => {
-      if (viewShed) {
+      if (viewShed && scene) {
         ViewShed(scene, viewshedButton, handler);
       }
     },
@@ -540,7 +539,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
 
       const handler = new ScreenSpaceEventHandler(scene.canvas);
 
-      helpers.addStreetView(streetView, handler);
+      helpers.addStreetView(streetView, handler, oGlobe);
       helpers.addViewShed(viewShed, handler);
       helpers.addControls();
       helpers.showGlobeOption();

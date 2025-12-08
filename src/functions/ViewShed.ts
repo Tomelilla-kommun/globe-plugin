@@ -1,6 +1,7 @@
 import * as Cesium from 'cesium';
 import SensorShadow from './SensorShadow';
 import { getCameraHeight } from '../globeState';
+import type { Scene } from "cesium";
 
 type Points = {
   start: Cesium.Cartesian3 | null;
@@ -16,7 +17,7 @@ let isViewShed = false;
 
 /** Sets up the Viewshed interaction tool */
 export default function setupViewshed(
-  scene: Cesium.Scene,
+  scene: Scene,
   viewshedButton: { getId: () => string },
   handler: Cesium.ScreenSpaceEventHandler
 ): void {
@@ -150,7 +151,7 @@ export default function setupViewshed(
 
       const updatedPos: Cesium.Cartesian3 = Cesium.Cartographic.toCartesian(newCarto);
       pickedEntity.position = updatedPos;
-      (sensorShadowInstance as SensorShadow).cameraPosition = updatedPos;
+      (sensorShadowInstance as SensorShadow).cameraPosition = new Cesium.ConstantPositionProperty(updatedPos);
     }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
     // End drag
