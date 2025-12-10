@@ -7,6 +7,7 @@ import {
   Cartesian3,
   Cartographic,
   sampleTerrainMostDetailed,
+  ShadowMode,
   Model,
   Transforms,
   HeadingPitchRoll,
@@ -21,6 +22,7 @@ import {
 } from 'cesium';
 import GeoJSON from 'ol/format/GeoJSON';
 import Map from 'ol/Map';
+import { loadTreesIncremental } from '../functions/loadTrees';
 
 interface LayerOptions {
   dataSource?: string;
@@ -119,67 +121,7 @@ export default async function load3DLayers(
       }
 
     } else if (type === 'THREEDTILE' && model) {
-      const url = `${layer.get('dataSource')}?service=WFS&version=1.0.0&request=GetFeature&typeName=${layer.get('name')}&outputFormat=application/json&srsName=EPSG:4326`;
-      try {
-        const response = await fetch(url);
-        const geojson = await response.json();
-        const features = new GeoJSON().readFeatures(geojson);
-
-        for (const feature of features) {
-          const geometry = feature.getGeometry();
-          if (!geometry) continue;
-
-          let coords: [number, number];
-          if (geometry.getType() === 'Point') {
-            coords = (geometry as any).getCoordinates();
-          } else if (geometry.getType() === 'Polygon') {
-            coords = (geometry as any).getCoordinates()[0][0];
-          } else if (geometry.getType() === 'MultiPolygon') {
-            coords = (geometry as any).getCoordinates()[0][0][0];
-          } else {
-            continue;
-          }
-          const [lon, lat] = coords;
-
-          const speciesAttr = model.gltf.speciesAttr;
-          const speciesName = feature.get(speciesAttr) || "";
-          const speciesSettings = model.gltf.species?.[speciesName];
-          const useSpeciesModel = speciesSettings !== undefined;
-          const modelUrl = useSpeciesModel ? speciesSettings.model : model.gltf.baseModel;
-
-          const rawHeight = parseFloat(feature.get(model.gltf.heightAttr || "")) || 1;
-          const modelHeight = useSpeciesModel && speciesSettings.modelHeight
-            ? speciesSettings.modelHeight
-            : model.gltf.baseModelHeight || 1;
-          const scale = rawHeight / modelHeight;
-
-          const cartoPosition = Cartographic.fromDegrees(lon, lat);
-          await sampleTerrainMostDetailed(scene.terrainProvider, [cartoPosition]);
-          const terrainHeight = cartoPosition.height ?? 0;
-          const position = Cartesian3.fromDegrees(lon, lat, terrainHeight);
-
-          const randomHeading = CesiumMath.toRadians(Math.random() * 360);
-          const hpr = new HeadingPitchRoll(randomHeading, 0, 0);
-          const modelMatrix = Transforms.headingPitchRollToFixedFrame(position, hpr, Ellipsoid.WGS84);
-
-          const modelPrimitive = await Model.fromGltfAsync({
-            url: modelUrl,
-            modelMatrix,
-            scale,
-            minimumPixelSize: 0,
-            asynchronous: true,
-          });
-
-          modelPrimitive.show = layer.get('visible');
-
-          layer.CesiumModels = layer.CesiumModels || [];
-          layer.CesiumModels.push(modelPrimitive);
-          scene.primitives.add(modelPrimitive);
-        }
-      } catch (err) {
-        console.error('Error loading WFS GLTF layer:', err);
-      }
-
+      await loadTreesIncremental(layer, scene, model);
     } else if (type === 'THREEDTILE' && dataType === 'model') {
       const models = layer.get('models');
 
@@ -225,6 +167,7 @@ export default async function load3DLayers(
             dynamicScreenSpaceError: true,
             show: layer.get('visible'),
           });
+
         } else if (url === 'OSM-Buildings' && cesiumIontoken !== "") {
           layerTileset = await createOsmBuildingsAsync({
             showOutline: layer.get('showOutline')
@@ -236,6 +179,10 @@ export default async function load3DLayers(
             // preloadFlightDestinations: true,
             show: layer.get('visible')
           });
+          // layerTileset.debugShowBoundingVolume = true;
+          // layerTileset.debugShowContentBoundingVolume = true;
+          // layerTileset.debugShowViewerRequestVolume = true;
+          // layerTileset.debugWireframe = true;
         }
 
         const tileset = scene.primitives.add(layerTileset!);
