@@ -20,7 +20,11 @@ const MEDIUM_DISTANCE = 300;
 const HIGH_DISTANCE = 120;
 const MOVE_THRESHOLD = 70;
 const CHUNK_CREATE = 40; // smaller batches are smoother
-const CAMERA_THROTTLE_MS = 250; // throttle updates while panning
+let moving = false;
+let stableTimer: number | undefined;      // timeout ID
+let stableRAF: number | undefined;        // rAF ID
+const STABLE_DELAY = 900;
+
 
 // --- Fast distance (Haversine) --------------------------------
 function dMeters(lon1: number, lat1: number, lon2: number, lat2: number) {
@@ -210,6 +214,7 @@ export async function loadTreesIncremental(layer: any, scene: Scene, modelCfg: a
   let lock = false;
 
   async function updateLOD() {
+    if (moving) return; 
     if (lock) return;
     lock = true;
 
@@ -318,16 +323,24 @@ export async function loadTreesIncremental(layer: any, scene: Scene, modelCfg: a
 
     lock = false;
   }
+  // --- Freeze LOD while camera moves ---------------------------
+  function onCameraMove() {
+    moving = true;
 
-  // throttle + attach camera
-  let lastUpdate = 0;
-  scene.camera.changed.addEventListener(() => {
-    const now = performance.now();
-    if (now - lastUpdate > CAMERA_THROTTLE_MS) {
-      lastUpdate = now;
-      updateLOD();
-    }
-  });
+    // cancel previous timers
+    if (stableTimer) clearTimeout(stableTimer);
+    if (stableRAF) cancelAnimationFrame(stableRAF);
+
+    // schedule stability check
+    stableRAF = requestAnimationFrame(() => {
+      stableTimer = window.setTimeout(() => {
+        moving = false;
+        updateLOD();  // run once after stabilized
+      }, STABLE_DELAY);
+    });
+  }
+
+  scene.camera.changed.addEventListener(onCameraMove);
 
   // initial pass
   updateLOD();
