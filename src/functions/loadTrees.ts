@@ -23,7 +23,7 @@ const CHUNK_CREATE = 40; // smaller batches are smoother
 let moving = false;
 let stableTimer: number | undefined;      // timeout ID
 let stableRAF: number | undefined;        // rAF ID
-const STABLE_DELAY = 900;
+const STABLE_DELAY = 500;
 
 
 // --- Fast distance (Haversine) --------------------------------
@@ -125,16 +125,22 @@ export async function loadTreesIncremental(layer: any, scene: Scene, modelCfg: a
   }
 
   // --- Preload LOD URLs (all species) ------------------------
-  async function preloadLOD(url: string) {
-    if (!url) return;
-    if (!lodPools.has(url)) {
-      const model = await Model.fromGltfAsync({ url, allowPicking: false });
-      model.show = false;
-      model.shadows = ShadowMode.DISABLED;
-      scene.primitives.add(model);
-      lodPools.set(url, model);
-    }
-  }
+// --- Preload and pool ----------------------------------------
+async function preloadLOD(url: string) {
+  if (!url || lodPools.has(url)) return;
+
+  // Warm GPU + shader pipeline without creating a visible model
+  const m = await Model.fromGltfAsync({
+    url,
+    allowPicking: false,
+    asynchronous: true
+  });
+
+  // <- DO NOT add to scene!
+  lodPools.set(url, m); // store Model instance
+}
+
+
 
   // Gather all LOD URLs and preload (non-blocking serial)
   const lodUrls = new Set<string>();
@@ -143,22 +149,24 @@ export async function loadTreesIncremental(layer: any, scene: Scene, modelCfg: a
     if (t.urlMedium) lodUrls.add(t.urlMedium);
     if (t.urlLow) lodUrls.add(t.urlLow);
   });
-  for (const u of lodUrls) await preloadLOD(u);
+  Promise.all([...lodUrls].map(preloadLOD));
 
   // --- createTree (simple, no post-check) -------------------
-  async function createTree(t: any) {
-    const model = await Model.fromGltfAsync({
-      url: t.url,
-      modelMatrix: buildMatrix(t),
-      allowPicking: false
-    });
-    model.shadows = ShadowMode.DISABLED;
-    model.show = true;
-    scene.primitives.add(model);
+async function createTree(t: any) {
+  // Fast because GLTF + textures already in cache
+  const model = await Model.fromGltfAsync({
+    url: t.url,
+    modelMatrix: buildMatrix(t),
+    allowPicking: false
+  });
 
-    // register
-    live.set(t.fid, { type: "model", model, url: t.url });
-  }
+  model.shadows = ShadowMode.DISABLED;
+  model.show = true;
+
+  scene.primitives.add(model);
+
+  live.set(t.fid, { model, url: t.url });
+}
 
   // --- queue + processing (sequential-ish, chunked per frame) --
   let treeQueue: any[] = [];
@@ -239,7 +247,7 @@ export async function loadTreesIncremental(layer: any, scene: Scene, modelCfg: a
       for (const [fid, item] of Array.from(live.entries())) {
         try {
           scene.primitives.remove(item.model);
-          item.model.destroy?.();
+          // item.model.destroy?.();
         } catch (e) {}
         live.delete(fid);
       }
@@ -250,13 +258,25 @@ export async function loadTreesIncremental(layer: any, scene: Scene, modelCfg: a
 
     // query RBush for candidates inside bounding box then precise filter
     const deg = RADIUS_M / 111320;
+// --- optimized bounding-box query + single distance compute ---
+    const bbox = {
+      minX: lon - deg,
+      minY: lat - deg,
+      maxX: lon + deg,
+      maxY: lat + deg
+    };
+
     const hits = index
-      .search({ minX: lon - deg, minY: lat - deg, maxX: lon + deg, maxY: lat + deg })
-      .map((r: any) => r.t)
-      .filter((t: any) => {
-        // precise meters
-        return dMeters(lon, lat, t.lon, t.lat) <= RADIUS_M;
-      });
+      .search(bbox)
+      .map((r: any) => {
+        const t = r.t;
+        return {
+          t,
+          dist: dMeters(lon, lat, t.lon, t.lat)
+        };
+      })
+      .filter(o => o.dist <= RADIUS_M);
+
 
     // build keep set
     const keep = new Set(hits.map((h: any) => h.fid));
@@ -266,7 +286,7 @@ export async function loadTreesIncremental(layer: any, scene: Scene, modelCfg: a
       if (!keep.has(fid)) {
         try {
           scene.primitives.remove(item.model);
-          item.model.destroy?.();
+          // item.model.destroy?.();
         } catch (e) {}
         live.delete(fid);
       }
@@ -276,8 +296,9 @@ export async function loadTreesIncremental(layer: any, scene: Scene, modelCfg: a
     const queued = new Set<string>();
     const newQueue: any[] = [];
 
-    for (const t of hits) {
-      const dist = dMeters(lon, lat, t.lon, t.lat);
+    for (const o of hits) {
+      const t = o.t;
+      const dist = o.dist;
 
       // choose LOD URL
       let lodUrl = t.urlLow || modelCfg.low;
@@ -288,33 +309,22 @@ export async function loadTreesIncremental(layer: any, scene: Scene, modelCfg: a
       const qItem = { ...t, url: lodUrl };
 
       const item = live.get(t.fid);
-      if (!item) {
-        if (!queued.has(t.fid)) {
-          newQueue.push(qItem);
-          queued.add(t.fid);
-        }
-      } else {
-        // LOD changed?
-        if (item.url !== lodUrl) {
-          // remove old model immediately
-          try {
-            scene.primitives.remove(item.model);
-            item.model.destroy?.();
-          } catch (e) {}
-          live.delete(t.fid);
-
-          if (!queued.has(t.fid)) {
-            newQueue.push(qItem);
-            queued.add(t.fid);
+      if (!item || item.url !== lodUrl) {
+          // remove old model
+          if (item) {
+              scene.primitives.remove(item.model);
+              live.delete(t.fid);
           }
-        } else {
-          // same LOD, just update transform & ensure visible
-          try {
-            item.model.modelMatrix = buildMatrix(t);
-            item.model.show = true;
-          } catch (e) {}
-        }
+          if (!queued.has(t.fid)) {
+              newQueue.push(qItem);
+              queued.add(t.fid);
+          }
+      } else {
+          // same LOD
+          item.model.modelMatrix = buildMatrix(t);
+          item.model.show = true;
       }
+
     }
 
     // replace queue and start processing
@@ -340,7 +350,7 @@ export async function loadTreesIncremental(layer: any, scene: Scene, modelCfg: a
     });
   }
 
-  scene.camera.changed.addEventListener(onCameraMove);
+  scene.camera.moveStart.addEventListener(onCameraMove);
 
   // initial pass
   updateLOD();
