@@ -56,10 +56,11 @@ export async function loadTrees(
 
   const scheduler = new TreeLoadScheduler(scene);
 
-  for (const meta of metas) {
-    scheduler.addTree(meta);
-  }
+    // for (const meta of metas) {
+    //   scheduler.addTree(meta);
+    // }
 
+  scheduler.addTrees(metas);
   scheduler.start();
 
 }

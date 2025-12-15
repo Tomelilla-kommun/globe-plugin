@@ -10,21 +10,21 @@ import {
   Scene,
   Matrix4,
   Resource,
-  Request
+  Cartesian2
 } from "cesium";
 import RBush from "rbush";
 
 /* ---------------- Tunables ---------------- */
+/* ---------------- Tunables ---------------- */
+const RADIUS_M = 800;
+const HIGH_DISTANCE = 70;
+const MEDIUM_DISTANCE = 200;
+const MOVE_THRESHOLD = 100;
+const STABLE_DELAY = 600;
+const MAX_CONCURRENT = 3;
+const QUEUE_THROTTLE_MS = 8;
 
-const RADIUS_M = 700;
-const HIGH_DISTANCE = 120;
-const MEDIUM_DISTANCE = 300;
-const MOVE_THRESHOLD = 70;
-const STABLE_DELAY = 500;
-const MAX_CONCURRENT = 2;
-
-/* ---------------- Types ---------------- */
-
+/* ---------------- Helpers ---------------- */
 type TreeMeta = {
   fid: string;
   lon: number;
@@ -41,48 +41,46 @@ type TreeMeta = {
 type LiveTree = {
   model: Model;
   url: string;
+  matrix?: Matrix4; // cached for reuse if not facing camera
 };
-
-/* ====================================================== */
 
 export class TreeLoadScheduler {
   private scene: Scene;
   private index = new RBush<any>();
   private all = new Map<string, TreeMeta>();
   private live = new Map<string, LiveTree>();
-
   private queue: TreeMeta[] = [];
   private loading = 0;
+  private pauseQueue = false;
+  private lock = false;
 
   private lastLon?: number;
   private lastLat?: number;
   private moving = false;
-  private lock = false;
-
   private stableTimer?: number;
-
-  /* ---------------- Debug HUD ---------------- */
 
   private hud = document.createElement("div");
 
   constructor(scene: Scene) {
     this.scene = scene;
-    this.hookCamera();
+    this.scene.camera.moveStart.addEventListener(this.onMove);
     this.createHUD();
   }
 
-  /* ---------------- Public API ---------------- */
+  addTrees(metas: TreeMeta[]) {
+    metas.forEach(meta => this.all.set(meta.fid, meta));
 
-  addTree(meta: TreeMeta) {
-    this.all.set(meta.fid, meta);
-    this.index.insert({
+    const items = metas.map(meta => ({
       minX: meta.lon,
       minY: meta.lat,
       maxX: meta.lon,
       maxY: meta.lat,
       t: meta
-    });
+    }));
+
+    this.index.load(items);
   }
+
 
   start() {
     this.updateLOD();
@@ -91,177 +89,177 @@ export class TreeLoadScheduler {
   destroy() {
     this.scene.camera.moveStart.removeEventListener(this.onMove);
 
-    for (const { model } of this.live.values()) {
-      try {
-        this.scene.primitives.remove(model);
-        if (!model.isDestroyed()) model.destroy();
-      } catch {}
+    // Batch removal
+    const modelsToRemove = Array.from(this.live.values()).map(l => l.model);
+    for (const m of modelsToRemove) {
+      this.scene.primitives.remove(m);
+      if (!m.isDestroyed()) m.destroy();
     }
-
     this.live.clear();
     this.hud.remove();
   }
 
   /* ---------------- Camera ---------------- */
+private onMove = () => {
+  this.moving = true;
+  clearTimeout(this.stableTimer);
+  this.stableTimer = window.setTimeout(() => {
+    this.moving = false;
+    this.updateLOD(); // trigger LOD update when camera stops moving
+  }, STABLE_DELAY);
+};
 
-  private hookCamera() {
-    this.scene.camera.moveStart.addEventListener(this.onMove);
-  }
-
-  private onMove = () => {
-    this.moving = true;
-
-    if (this.stableTimer) clearTimeout(this.stableTimer);
-
-    this.stableTimer = window.setTimeout(() => {
-      this.moving = false;
-      this.updateLOD();
-    }, STABLE_DELAY);
-  };
 
   /* ---------------- LOD ---------------- */
-
   private updateLOD() {
     if (this.lock || this.moving) return;
     this.lock = true;
 
-    const cam = Cartographic.fromCartesian(this.scene.camera.positionWC);
-    const lon = CesiumMath.toDegrees(cam.longitude);
-    const lat = CesiumMath.toDegrees(cam.latitude);
+    const camCart = Cartographic.fromCartesian(this.scene.camera.positionWC);
+    const camLon = CesiumMath.toDegrees(camCart.longitude);
+    const camLat = CesiumMath.toDegrees(camCart.latitude);
+    const camHeight = camCart.height || 0;
 
     if (
       this.lastLon !== undefined &&
       this.lastLat !== undefined &&
-      this.distance(lon, lat, this.lastLon, this.lastLat) < MOVE_THRESHOLD
+      this.distance(camLon, camLat, this.lastLon, this.lastLat) < MOVE_THRESHOLD
     ) {
       this.lock = false;
       return;
     }
 
-    this.lastLon = lon;
-    this.lastLat = lat;
+    this.lastLon = camLon;
+    this.lastLat = camLat;
 
     const deg = RADIUS_M / 111320;
-    const bbox = {
-      minX: lon - deg,
-      minY: lat - deg,
-      maxX: lon + deg,
-      maxY: lat + deg
-    };
+    const bbox = { minX: camLon - deg, minY: camLat - deg, maxX: camLon + deg, maxY: camLat + deg };
 
     const hits = this.index
       .search(bbox)
-      .map((r: any) => ({
-        t: r.t,
-        d: this.distance(lon, lat, r.t.lon, r.t.lat)
-      }))
-      .filter(h => h.d <= RADIUS_M);
+      .map((r: any) => {
+        const horizontal = this.distance(camLon, camLat, r.t.lon, r.t.lat);
+        const vertical = r.t.height ?? 0;
+        return { t: r.t, horizontal, vertical };
+      })
+      .filter(h => h.horizontal <= RADIUS_M && Math.abs(h.vertical - camHeight) <= RADIUS_M);
+
 
     const keep = new Set(hits.map(h => h.t.fid));
 
-    /* --- Remove far trees (safe) --- */
-    for (const [fid, item] of Array.from(this.live.entries())) {
+    // Batch remove far/out-of-cylinder trees
+    const removeModels: Model[] = [];
+    for (const [fid, item] of this.live.entries()) {
       if (!keep.has(fid)) {
-        try {
-          this.scene.primitives.remove(item.model);
-          if (!item.model.isDestroyed()) item.model.destroy();
-        } catch {}
+        removeModels.push(item.model);
         this.live.delete(fid);
       }
     }
+    for (const m of removeModels) {
+      this.scene.primitives.remove(m);
+      if (!m.isDestroyed()) m.destroy();
+    }
 
-    /* --- Queue new / changed LODs --- */
-    const queued = new Set<string>();
+    // Queue new/updated LODs
     const newQueue: TreeMeta[] = [];
+    const queued = new Set<string>();
 
-    for (const h of hits) {
-      const t = h.t;
+    for (const { t, horizontal: d } of hits) {
       let url = t.urlLow;
-      if (h.d < HIGH_DISTANCE) url = t.urlHigh || url;
-      else if (h.d < MEDIUM_DISTANCE) url = t.urlMedium || url;
+      let faceCamera = false;
+
+      if (d < HIGH_DISTANCE) url = t.urlHigh || url;
+      else if (d < MEDIUM_DISTANCE) url = t.urlMedium || url;
+      else faceCamera = true; // low-poly single-faced
 
       const existing = this.live.get(t.fid);
-
-      // Keep existing model
-      if (existing && existing.url === url) {
-        existing.model.modelMatrix = this.buildMatrix(t);
+      if (existing?.url === url) {
+        // Reuse matrix if not facing camera
+        if (existing && !faceCamera && existing.matrix) {
+          existing.model.modelMatrix = existing.matrix;
+        } else if (existing && faceCamera) {
+          console.log('ja')
+          const m = this.buildMatrix(t, faceCamera, camCart);
+          existing.model.modelMatrix = m;
+          if (!faceCamera) existing.matrix = m;
+        }
         continue;
       }
 
-      // Replace model
-      if (existing) {
-        try {
-          this.scene.primitives.remove(existing.model);
-          if (!existing.model.isDestroyed()) existing.model.destroy();
-        } catch {}
-        this.live.delete(t.fid);
-      }
-
       if (!queued.has(t.fid)) {
-        newQueue.push({ ...t, url });
+        newQueue.push({ ...t, url, faceCamera });
         queued.add(t.fid);
       }
     }
 
     this.queue = newQueue;
+    this.scheduleQueueRunner();
     this.processQueue();
     this.lock = false;
   }
 
   /* ---------------- Loading ---------------- */
+  private queueRunnerScheduled = false;
+
+  private scheduleQueueRunner() {
+    if (this.queueRunnerScheduled) return;
+    this.queueRunnerScheduled = true;
+    requestAnimationFrame(() => {
+      this.queueRunnerScheduled = false;
+      this.processQueue();
+      // Reschedule if queue still has items
+      if (this.queue.length > 0 && !this.pauseQueue) this.scheduleQueueRunner();
+    });
+  }
 
   private async processQueue() {
+    if (this.pauseQueue) return;
+
     while (this.queue.length && this.loading < MAX_CONCURRENT) {
       const t = this.queue.shift()!;
       this.loading++;
-
       this.loadTree(t)
         .catch(() => {})
         .finally(() => {
           this.loading--;
-          // 🔥 THIS IS THE MISSING LINE
-          this.processQueue();
+          // Throttle next load to prevent spikes
+          setTimeout(() => this.processQueue(), QUEUE_THROTTLE_MS);
         });
     }
   }
 
-
-  private async loadTree(t: TreeMeta) {
-    const resource = new Resource({
-      url: t.url!,
-      request: new Request({
-        throttle: true,
-        priority: 100
-      })
-    });
-
+  private async loadTree(t: TreeMeta & { faceCamera?: boolean }) {
+    const resource = new Resource({ url: t.url! });
     const model = await Model.fromGltfAsync({
       url: resource,
-      modelMatrix: this.buildMatrix(t),
+      modelMatrix: this.buildMatrix(t, t.faceCamera),
       allowPicking: false,
       asynchronous: true
     });
 
     model.shadows = ShadowMode.DISABLED;
     this.scene.primitives.add(model);
-    this.live.set(t.fid, { model, url: t.url! });
+
+    this.live.set(t.fid, { model, url: t.url!, matrix: t.faceCamera ? undefined : model.modelMatrix });
   }
 
   /* ---------------- Helpers ---------------- */
-
-  private buildMatrix(t: TreeMeta) {
+  private buildMatrix(t: TreeMeta, faceCamera = false, camCart?: Cartographic) {
     const pos = Cartesian3.fromDegrees(t.lon, t.lat, t.height || 0);
+
+    // if (faceCamera && camCart) {
+    //   const camPos = Ellipsoid.WGS84.cartographicToCartesian(camCart);
+    //   const direction = Cartesian3.subtract(camPos, pos, new Cartesian3());
+    //   let heading = Math.atan2(direction.y, direction.x);
+    //   // heading += Math.PI / 6; // rotate 90 deg
+    //   const hpr = new HeadingPitchRoll(heading, 0, 0);
+    //   const m = Transforms.headingPitchRollToFixedFrame(pos, hpr, Ellipsoid.WGS84);
+    //   return Matrix4.multiplyByScale(m, new Cartesian3(t.scale, t.scale, t.scale), new Matrix4());
+    // }
+
     const hpr = new HeadingPitchRoll(t.rot, 0, 0);
-    const m = Transforms.headingPitchRollToFixedFrame(
-      pos,
-      hpr,
-      Ellipsoid.WGS84
-    );
-    return Matrix4.multiplyByScale(
-      m,
-      new Cartesian3(t.scale, t.scale, t.scale),
-      new Matrix4()
-    );
+    const m = Transforms.headingPitchRollToFixedFrame(pos, hpr, Ellipsoid.WGS84);
+    return Matrix4.multiplyByScale(m, new Cartesian3(t.scale, t.scale, t.scale), new Matrix4());
   }
 
   private distance(lon1: number, lat1: number, lon2: number, lat2: number) {
@@ -270,14 +268,11 @@ export class TreeLoadScheduler {
     const φ2 = CesiumMath.toRadians(lat2);
     const dφ = φ2 - φ1;
     const dλ = CesiumMath.toRadians(lon2 - lon1);
-    const a =
-      Math.sin(dφ / 2) ** 2 +
-      Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
+    const a = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
   /* ---------------- Debug HUD ---------------- */
-
   private createHUD() {
     Object.assign(this.hud.style, {
       position: "absolute",
@@ -290,20 +285,17 @@ export class TreeLoadScheduler {
       zIndex: "9999",
       fontSize: "12px"
     });
-
     document.body.appendChild(this.hud);
 
     const update = () => {
       this.hud.innerHTML = `
-  Trees live: ${this.live.size}<br>
-  Queued: ${this.queue.length}<br>
-  Loading: ${this.loading}<br>
-  Camera moving: ${this.moving}<br>
-        `;
+        Trees live: ${this.live.size}<br>
+        Queued: ${this.queue.length}<br>
+        Loading: ${this.loading}<br>
+        Camera moving: ${this.moving}<br>
+      `;
       requestAnimationFrame(update);
     };
-
     update();
   }
-
 }
