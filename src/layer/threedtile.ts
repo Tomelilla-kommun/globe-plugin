@@ -22,7 +22,7 @@ import {
 } from 'cesium';
 import GeoJSON from 'ol/format/GeoJSON';
 import Map from 'ol/Map';
-import { loadTreesIncremental } from '../functions/loadTrees';
+import { loadTrees } from '../functions/loadTrees';
 
 interface LayerOptions {
   dataSource?: string;
@@ -121,7 +121,7 @@ export default async function load3DLayers(
       }
 
     } else if (type === 'THREEDTILE' && model) {
-      await loadTreesIncremental(layer, scene, model);
+      await loadTrees(layer, scene, model);
     } else if (type === 'THREEDTILE' && dataType === 'model') {
       const models = layer.get('models');
 
