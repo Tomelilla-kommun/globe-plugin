@@ -36,3 +36,7 @@ export function getHandler(): ScreenSpaceEventHandler | null {
 export function setHandler(scene: Scene): void {
   handler = new ScreenSpaceEventHandler(scene.canvas);
 }
+
+export function isGlobeActive(oGlobe: any): boolean {
+  return oGlobe.getEnabled();
+}

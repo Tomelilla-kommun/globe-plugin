@@ -46,7 +46,7 @@ export default function setupViewshed(
   /** Disables and cleans up viewshed mode */
   function disableViewshed(): void {
     isViewShed = false;
-    scene.globe.shadows = Cesium.ShadowMode.DISABLED;
+    // scene.globe.shadows = Cesium.ShadowMode.DISABLED;
     points = { start: null, end: null };
 
     // Remove all primitives

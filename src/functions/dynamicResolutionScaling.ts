@@ -38,7 +38,7 @@ export default function dynamicResolutionScaling(oGlobe: GlobeLike, scene: Cesiu
     maxFrameTime: 50,
     tiltEnter: Cesium.Math.toRadians(1.8), 
     tiltExit: Cesium.Math.toRadians(1.2), 
-    mseHigh: 3,
+    mseHigh: 1,
     mseLow: 6,
     lowDetailMinTime: 800,
     idleRenderDelay: 500,
@@ -126,7 +126,7 @@ export default function dynamicResolutionScaling(oGlobe: GlobeLike, scene: Cesiu
     cfg.tiltEnter = Cesium.Math.toRadians(2.2);
     cfg.tiltExit = Cesium.Math.toRadians(1.4);
     cfg.mseLow = 7;
-    cfg.mseHigh = 2;
+    cfg.mseHigh = 1;
     cfg.idleRenderDelay = 300;
     if (cfg.debugLogs) console.warn("Low-end GPU detected → enabling low-end mode.");
   }

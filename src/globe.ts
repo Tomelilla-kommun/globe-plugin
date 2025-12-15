@@ -15,7 +15,6 @@ import {
   JulianDate,
   Clock,
 } from 'cesium';
-import isGlobeActive from './functions/isglobeactive';
 import measureTool from './functions/measureTool';
 import addGLTF from './layer/gltf';
 import add3DTile from './layer/threedtile';
@@ -26,7 +25,7 @@ import StreetView from './functions/StreetView';
 import CameraControls from './functions/CameraControls';
 import dynamicResolutionScaling from './functions/dynamicResolutionScaling';
 import patchCollections from './functions/patchCollections';
-import { setCameraHeight, getCameraHeight, setIsStreetMode, getIsStreetMode } from './globeState';
+import { setCameraHeight, getCameraHeight, setIsStreetMode, getIsStreetMode, isGlobeActive } from './globeState';
 
 declare global {
   interface Window {
@@ -213,7 +212,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         enableTime: true,
         defaultDate: new Date(),
         enableSeconds: true,
-        disableMobile: false,
+        disableMobile: true,
         time_24hr: true,
       });
     },
@@ -394,27 +393,41 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     },
     addMeasureTool: (scene: Cesium.Scene): void => {
       let tool: ReturnType<typeof measureTool> | null = null;
-      const originalButton = document.getElementsByClassName('o-measure')[0] as HTMLElement;
 
-      // Clone the element to remove existing listeners
-      const newButton = originalButton.cloneNode(true) as HTMLElement;
-      originalButton.replaceWith(newButton);
+      const button = document.getElementsByClassName('o-measure')[0] as HTMLElement;
 
-      // Add your own toggle behavior
-      newButton.addEventListener('click', () => {
-        if (!tool) {
-          // Start measuring
-          tool = measureTool(scene);
-          tool.measureDistance();
-          newButton.classList.add('active'); // optional visual highlight
-        } else {
-          // Clear/destroy measurement
-          tool.destroy();
-          tool = null;
-          newButton.classList.remove('active');
-        }
-      });
+      const originalOnClick = button.onclick;
+      button.onclick = null;
+
+      button.addEventListener(
+        'click',
+        (e) => {
+          if (!isGlobeActive(oGlobe)) {
+            // Let Origo behave exactly as before
+            originalOnClick?.call(button, e);
+            return;
+          }
+
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          e.stopPropagation();
+
+          // --- Globe behavior ---
+          if (!tool) {
+            tool = measureTool(scene);
+            tool.measureDistance();
+            button.classList.add('active');
+          } else {
+            tool.destroy();
+            tool = null;
+            button.classList.remove('active');
+          }
+        },
+        true // 👈 capture phase (VERY important)
+      );
     }
+
+
   };
 
   const assets = {
