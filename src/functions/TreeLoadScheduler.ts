@@ -10,17 +10,16 @@ import {
   Scene,
   Matrix4,
   Resource,
-  Cartesian2
 } from "cesium";
 import RBush from "rbush";
 
 /* ---------------- Tunables ---------------- */
 /* ---------------- Tunables ---------------- */
-const RADIUS_M = 800;
+const RADIUS_M = 700;
 const HIGH_DISTANCE = 70;
 const MEDIUM_DISTANCE = 200;
-const MOVE_THRESHOLD = 100;
-const STABLE_DELAY = 600;
+const MOVE_THRESHOLD = 50;
+const STABLE_DELAY = 400;
 const MAX_CONCURRENT = 3;
 const QUEUE_THROTTLE_MS = 8;
 
@@ -142,8 +141,8 @@ private onMove = () => {
         const vertical = r.t.height ?? 0;
         return { t: r.t, horizontal, vertical };
       })
-      .filter(h => h.horizontal <= RADIUS_M && Math.abs(h.vertical - camHeight) <= RADIUS_M);
-
+      // Keep only trees inside the cylinder
+      .filter(h => h.horizontal <= RADIUS_M && h.vertical >= camHeight - RADIUS_M);
 
     const keep = new Set(hits.map(h => h.t.fid));
 
@@ -151,7 +150,8 @@ private onMove = () => {
     const removeModels: Model[] = [];
     for (const [fid, item] of this.live.entries()) {
       if (!keep.has(fid)) {
-        removeModels.push(item.model);
+        this.scene.primitives.remove(item.model);
+        if (!item.model.isDestroyed()) item.model.destroy();
         this.live.delete(fid);
       }
     }
@@ -247,15 +247,15 @@ private onMove = () => {
   private buildMatrix(t: TreeMeta, faceCamera = false, camCart?: Cartographic) {
     const pos = Cartesian3.fromDegrees(t.lon, t.lat, t.height || 0);
 
-    // if (faceCamera && camCart) {
-    //   const camPos = Ellipsoid.WGS84.cartographicToCartesian(camCart);
-    //   const direction = Cartesian3.subtract(camPos, pos, new Cartesian3());
-    //   let heading = Math.atan2(direction.y, direction.x);
-    //   // heading += Math.PI / 6; // rotate 90 deg
-    //   const hpr = new HeadingPitchRoll(heading, 0, 0);
-    //   const m = Transforms.headingPitchRollToFixedFrame(pos, hpr, Ellipsoid.WGS84);
-    //   return Matrix4.multiplyByScale(m, new Cartesian3(t.scale, t.scale, t.scale), new Matrix4());
-    // }
+    if (faceCamera && camCart) {
+      const camPos = Ellipsoid.WGS84.cartographicToCartesian(camCart);
+      const direction = Cartesian3.subtract(camPos, pos, new Cartesian3());
+      let heading = Math.atan2(direction.y, direction.x);
+      // heading += Math.PI / 6; // rotate 90 deg
+      const hpr = new HeadingPitchRoll(heading, 0, 0);
+      const m = Transforms.headingPitchRollToFixedFrame(pos, hpr, Ellipsoid.WGS84);
+      return Matrix4.multiplyByScale(m, new Cartesian3(t.scale, t.scale, t.scale), new Matrix4());
+    }
 
     const hpr = new HeadingPitchRoll(t.rot, 0, 0);
     const m = Transforms.headingPitchRollToFixedFrame(pos, hpr, Ellipsoid.WGS84);
