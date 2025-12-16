@@ -14,7 +14,6 @@ import {
 import RBush from "rbush";
 
 /* ---------------- Tunables ---------------- */
-/* ---------------- Tunables ---------------- */
 const RADIUS_M = 700;
 const HIGH_DISTANCE = 70;
 const MEDIUM_DISTANCE = 200;
@@ -52,6 +51,8 @@ export class TreeLoadScheduler {
   private loading = 0;
   private pauseQueue = false;
   private lock = false;
+
+  private visible = true;
 
   private lastLon?: number;
   private lastLat?: number;
@@ -98,6 +99,15 @@ export class TreeLoadScheduler {
     this.hud.remove();
   }
 
+  public setVisible(visible: boolean) {
+  this.visible = visible;
+
+  for (const { model } of this.live.values()) {
+    model.show = visible;
+  }
+}
+
+
   /* ---------------- Camera ---------------- */
 private onMove = () => {
   this.moving = true;
@@ -111,6 +121,8 @@ private onMove = () => {
 
   /* ---------------- LOD ---------------- */
   private updateLOD() {
+    console.log(this.visible)
+    if (!this.visible) return;
     if (this.lock || this.moving) return;
     this.lock = true;
 
@@ -178,7 +190,6 @@ private onMove = () => {
         if (existing && !faceCamera && existing.matrix) {
           existing.model.modelMatrix = existing.matrix;
         } else if (existing && faceCamera) {
-          console.log('ja')
           const m = this.buildMatrix(t, faceCamera, camCart);
           existing.model.modelMatrix = m;
           if (!faceCamera) existing.matrix = m;
@@ -237,7 +248,7 @@ private onMove = () => {
       asynchronous: true
     });
 
-    model.shadows = ShadowMode.DISABLED;
+    model.show = this.visible;
     this.scene.primitives.add(model);
 
     this.live.set(t.fid, { model, url: t.url!, matrix: t.faceCamera ? undefined : model.modelMatrix });

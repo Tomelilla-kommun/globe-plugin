@@ -22,18 +22,26 @@ class ThreedTile extends Layer {
     this.Opacity = 1;
     this.setVisible = (visible) => {
       this.set(LayerProperty.VISIBLE, visible);
-      if(this.CesiumTileset) {
-        this.CesiumTileset.show = !this.CesiumTileset.show;
-      } else if (this.CesiumModels) {
-        this.CesiumModels.forEach(element => {
-          element.show = !element.show;
+      console.log(this.treeScheduler)
+      this.treeScheduler.setVisible(visible);
+
+      if (this.CesiumTileset) {
+        this.CesiumTileset.show = visible;
+      }
+
+      if (this.CesiumModels) {
+        this.CesiumModels.forEach(m => {
+          m.show = visible;
         });
-      } else if(this.CesiumExtrusions) {
-        this.CesiumExtrusions.forEach(element => {
-          element.show = !element.show;
+      }
+
+      if (this.CesiumExtrusions) {
+        this.CesiumExtrusions.forEach(e => {
+          e.show = visible;
         });
       }
     };
+
     this.setSource(new Source({ projection: 'EPSG:3857' || 'EPSG:4326' }));
     this.getMaxResolution = () => 10000000;
     this.getMinResolution = () => 0;

@@ -55,6 +55,7 @@ export async function loadTrees(
   }
 
   const scheduler = new TreeLoadScheduler(scene);
+  layer.treeScheduler = scheduler;
 
     // for (const meta of metas) {
     //   scheduler.addTree(meta);
