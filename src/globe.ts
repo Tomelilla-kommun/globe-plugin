@@ -105,7 +105,7 @@ interface GlobeOptions {
   viewShed?: boolean;
   measure?: boolean;
   flyTo?: boolean;
-  shadowDates?: boolean;
+  quickTimeShadowPicker?: boolean;
   fx?: boolean;
   resolutionScale?: number;
   settings?: GlobeSettings;
@@ -123,7 +123,7 @@ const DEFAULT_OPTIONS: Required<Pick<GlobeOptions,
   'viewShed' |
   'measure' |
   'flyTo' |
-  'shadowDates' |
+  'quickTimeShadowPicker' |
   'fx'
 >> & { deactivateControls: string[] } = {
   showGlobe: true,
@@ -132,7 +132,7 @@ const DEFAULT_OPTIONS: Required<Pick<GlobeOptions,
   viewShed: false,
   measure: false,
   flyTo: false,
-  shadowDates: false,
+  quickTimeShadowPicker: false,
   fx: false,
   deactivateControls: [],
 };
@@ -258,7 +258,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     cameraControls,
     measure,
     flyTo,
-    shadowDates,
+    quickTimeShadowPicker,
     fx,
   } = resolvedOptions;
 
@@ -795,7 +795,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         buttons.push(viewshedButton);
       }
 
-      if (shadowDates) {
+      if (quickTimeShadowPicker) {
         const quickPicker = quickTimePicker(() => fp);
         if (quickPicker) {
           quickTimePickerButton = quickPicker.button;
@@ -868,7 +868,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         appendButton(globeButton);
         appendButton(flatpickrButton);
 
-        if (shadowDates) {
+        if (quickTimeShadowPicker) {
           appendButton(quickTimePickerButton);
         }
 

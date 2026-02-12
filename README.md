@@ -7,6 +7,8 @@ A plugin for [Origo map](https://github.com/origo-map/origo) to enable a [Cesium
 
 See [index_example.html](https://github.com/haninge-geodata/origo-globe-plugin/blob/main/index_example.html) and [index_example.json](https://github.com/haninge-geodata/origo-globe-plugin/blob/main/index_example.json) to get started with configuration.
 
+Origo Globe plugin only works with reference system EPSG:3857. Make sure that `index.json` is set to use EPSG:3857.
+
 Copy the files in the `build` folder and place them in Origo's `plugins/globe` folder.
 
 ℹ️ Due to loading issues, ol-cesium needs to be loaded from Origo-map.
@@ -23,6 +25,98 @@ import OLCesium from 'olcs/OLCesium';
 window.OLCesium = OLCesium;
 ```
 
+## Layer configuration
+
+To add 3D layers to the viewer, please see `index_example.json`.
+
+to adda a cstum terrain poiant to loacl terrrain tile folder in index.html at 
+
+
+### Custom terrain tiles
+
+To add a custom terrain provider that points to a local terrain tile folder, specify it in your `index.html` configuration:
+
+```js
+    cesiumTerrainProvider: 'path/to/your/terrain',
+```
+
+### Custom 3D-tile layer
+
+Within `index.json`, add your custom 3D-tile layer as shown below:
+
+```js
+{
+    "name": "Byggnader",
+    "title": "Byggnader",
+    "type": "THREEDTILE",
+    "url": "path/to/your/3Dtiles/tileset.json",
+    "visible": true,
+    "style": {
+        "color": "color('#FFFFFF', 1)"
+    }
+}
+```
+
+Changing `style` will affect the appearance of the 3D layer.
+
+### glb/gltf models
+
+To add glb/gltf models, use the example below. Several models can be added inside the array "models".
+
+```js
+{
+    "name": "GLB",
+    "title": "GLB",
+    "type": "THREEDTILE",
+    "dataType": "model",
+    "url": "path/to/your/GLB-GLTF-files",
+    "visible": true,
+    "models": [
+        {
+            "fileName": "hus1.glb",
+            "lat": 55.54734220671179,
+            "lng": 13.949731975672035,
+            "height": 66.0,
+            "heightReference": "NONE",
+            "rotHeading": 0,
+            "animation": false
+        },
+        ...
+    ]
+}
+```
+
+### Extruded 2D-layer
+
+To add 2D data as 3D extruded objects, add the layer as shown below.
+
+**Requirements:**
+- The data must have two height attributes: the height at the top of the object and the height at the bottom of the object, both relative to the geoid.
+
+Inside the `extrusion` attribute, assign the attribute values to `groundAttr` (height at the bottom of the object) and `roofAttr` (height at the top of the object).
+
+(Only tested with GeoServer)
+
+```js
+{
+    "name": "geostore:Byggnader",
+    "title": "Byggnader2D",
+    "dataSource": "https://mapserver.com/WFS",
+    "type": "THREEDTILE",
+    "dataType": "extrusion",
+    "extrusion": {
+        "groundAttr": "mark_hojd",
+        "roofAttr": "tak_hojd",
+        "color": "LIGHTGRAY",
+        "opacity": 0.9,
+        "outline": true,
+        "outlineColor": "RED"
+    },
+    "visible": true
+}
+```
+Changing `color`, `opacity`, `outline`, and `outlineColor` will affect the appearance of the layer.
+
 ## Functions
 
 All functions described in this section can be enabled or disabled in the `Globe` configuration (see below) within `index.html`:
@@ -33,7 +127,8 @@ const globe = Globe({
     streetView: true,
     cameraControls: true,
     measure: true,
-    shadowDates: true,
+    quickTimeShadowPicker: true,
+    flyTo: false,
     // ...
 });
 ```
@@ -69,7 +164,18 @@ With these controls, the user can tilt and rotate the camera using buttons.
 
 <img src="data/cameraControls.png" alt="CameraControls" title="CameraControls" height="80px" />
 
-### measure
+### Measure
 
+The Measure tool can measure between 3D objects and also between terrain and 3D objects.
 
-### shadowDates
+<img src="data/measure.png" alt="Measure" title="Measure" height="340px" />
+
+### QuickTimeShadowPicker
+
+Enables quick access to dates and times of equinoxes and solstices.
+
+<img src="data/quickTimeShadowPicker.png" alt="QuickTimeShadowPicker" title="QuickTimeShadowPicker" height="340px" />
+
+### FlyTo
+
+If activated, FlyTo will animate the camera to pan and zoom to focus on the selected object.
