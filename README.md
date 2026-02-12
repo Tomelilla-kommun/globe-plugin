@@ -25,13 +25,6 @@ import OLCesium from 'olcs/OLCesium';
 window.OLCesium = OLCesium;
 ```
 
-## Layer configuration
-
-To add 3D layers to the viewer, please see `index_example.json`.
-
-to adda a cstum terrain poiant to loacl terrrain tile folder in index.html at 
-
-
 ### Custom terrain tiles
 
 To add a custom terrain provider that points to a local terrain tile folder, specify it in your `index.html` configuration:
