@@ -1,5 +1,4 @@
 import * as Cesium from "cesium";
-import WMSThrottler from "./WMSThrottler";
 
 type GlobeLike = {
   setResolutionScale: (scale: number) => void;
@@ -15,7 +14,6 @@ interface State {
   ewmaFrameTime: number;
   lastLodUpdate: number;
   cameraMoving: boolean;
-  wmsThrottler?: WMSThrottler;
   lastAppliedScale: number;
   lastAppliedMSE: number;
   lastFrameTs: number;
@@ -80,7 +78,6 @@ export default function dynamicResolutionScaling(
     ewmaFrameTime: 0,
     lastLodUpdate: 0,
     cameraMoving: false,
-    wmsThrottler: undefined,
     lastAppliedScale: -1,
     lastAppliedMSE: -1,
     lastFrameTs: nowTs,
@@ -211,11 +208,6 @@ export default function dynamicResolutionScaling(
   }
 
   state.frustumFarBase = (scene.camera.frustum as any)?.far;
-  state.wmsThrottler = new WMSThrottler({
-    maxConcurrentIdle: LOW_END ? 3 : 8,
-    maxConcurrentMoving: LOW_END ? 1 : 4
-  });
-  state.wmsThrottler?.setCameraMoving(false);
 
   // ---------------------------------------
   // ACTIVE / IDLE RENDER MODE
@@ -229,9 +221,6 @@ export default function dynamicResolutionScaling(
     if (LOW_END) {
       applyResolutionScale(cfg.minScale);
     }
-
-    state.wmsThrottler?.setCameraMoving(true);
-    state.wmsThrottler?.pause?.();
 
     if (state.renderIdleTimer !== null) {
       clearTimeout(state.renderIdleTimer);
@@ -254,8 +243,6 @@ export default function dynamicResolutionScaling(
 
       applyResolutionScale(state.scale);
       scene.requestRender();
-      state.wmsThrottler?.setCameraMoving(false);
-      state.wmsThrottler?.resume?.();
 
       state.renderIdleTimer = null;
     }, cfg.idleRenderDelay);
@@ -400,9 +387,6 @@ export default function dynamicResolutionScaling(
     setDebugLogs(enabled: boolean) {
       cfg.debugLogs = enabled;
     },
-    getWmsThrottler() {
-      return state.wmsThrottler;
-    },
     dispose() {
       try {
         scene.camera.moveStart.removeEventListener(enableContinuousRender);
@@ -416,8 +400,6 @@ export default function dynamicResolutionScaling(
         Cesium.RequestScheduler.maximumRequestsPerServer = cfg.requestPerServerActive;
         applyResolutionScale(dpr);
         applyMSE(cfg.mseHigh);
-        state.wmsThrottler?.cancelAll?.();
-        state.wmsThrottler = undefined;
         if (typeof state.frustumFarBase === "number" && LOW_END) {
           const frustum = scene.camera.frustum as any;
           if (frustum && typeof frustum.far === "number") {

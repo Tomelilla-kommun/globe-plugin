@@ -7,7 +7,8 @@ import {
   Model,
   Scene,
   Matrix4,
-  Resource
+  Resource,
+  BoundingSphere
 } from "cesium";
 import RBush from "rbush";
 
@@ -17,6 +18,7 @@ const HIGH_DISTANCE = 70;
 const MEDIUM_DISTANCE = 200;
 const STABLE_DELAY = 400;
 const MAX_CONCURRENT = 3;
+const QUEUE_BATCH_SIZE = 5; // batch up to 5 trees per frame
 const QUEUE_THROTTLE_MS = 8;
 
 /* ---------------- Types ---------------- */
@@ -51,10 +53,27 @@ type LiveTree = {
 /* ========================================================= */
 
 export class TreeLoadScheduler {
+
+    /**
+     * Add an array of tree metadata to the scheduler's spatial index.
+     */
+    public addTrees(metas: TreeMeta[]) {
+      for (const m of metas) {
+        this.index.insert({
+          minX: m.lon,
+          minY: m.lat,
+          maxX: m.lon,
+          maxY: m.lat,
+          t: m
+        });
+      }
+    }
   private scene: Scene;
 
   private index = new RBush<any>();
   private live = new Map<string, LiveTree>();
+  // Pool for reusing Model objects by url/lod
+  private modelPool = new Map<string, Model[]>();
 
   private queue: QueueItem[] = [];
   private loading = 0;
@@ -72,19 +91,8 @@ export class TreeLoadScheduler {
     this.createHUD();
   }
 
-  /* ---------------- Public API ---------------- */
 
-  addTrees(metas: TreeMeta[]) {
-    for (const m of metas) {
-      this.index.insert({
-        minX: m.lon,
-        minY: m.lat,
-        maxX: m.lon,
-        maxY: m.lat,
-        t: m
-      });
-    }
-  }
+  /* ---------------- Public API ---------------- */
 
   start() {
     this.updateLOD();
@@ -129,7 +137,21 @@ export class TreeLoadScheduler {
     const lat = CesiumMath.toDegrees(camCart.latitude);
     const height = camCart.height || 0;
 
-    const hits = this.queryTrees(lon, lat, height);
+    const cam = this.scene.camera;
+    const viewMatrix = cam.viewMatrix;
+    let hits = this.queryTrees(lon, lat, height).filter(({ t }) => {
+      const pos = Cartesian3.fromDegrees(t.lon, t.lat, t.height || 0);
+      // Transform tree position to camera space
+      const camSpace = Matrix4.multiplyByPoint(viewMatrix, pos, new Cartesian3());
+      // Only consider trees in front of the camera (z < 0 in Cesium camera space)
+      return camSpace.z < 0;
+    });
+    // Prioritize by distance (closest first)
+    hits = hits.sort((a, b) => a.d - b.d);
+    // Enforce max 2000 trees: keep only the closest 2000
+    if (hits.length > 1000) {
+      hits = hits.slice(0, 1000);
+    }
     const keep = new Set(hits.map(h => h.t.fid));
 
     this.removeOutOfRange(keep);
@@ -164,13 +186,35 @@ export class TreeLoadScheduler {
     return { url: t.urlLow!, lod: "low" };
   }
 
+  // Deferred/unloading: remove trees in small batches for smoothness
   private removeOutOfRange(keep: Set<string>) {
+    const toRemove: [string, LiveTree][] = [];
     for (const [fid, item] of this.live) {
       if (!keep.has(fid)) {
-        this.scene.primitives.remove(item.model);
-        this.live.delete(fid);
+        toRemove.push([fid, item]);
       }
     }
+    if (toRemove.length === 0) return;
+    const BATCH_SIZE = 8; // You can make this configurable if needed
+    const BATCH_DELAY = 16; // ms, for smoother cleanup (about one frame)
+    let idx = 0;
+    const removeBatch = () => {
+      for (let i = 0; i < BATCH_SIZE && idx < toRemove.length; i++, idx++) {
+        const [fid, item] = toRemove[idx];
+        if (!item.model.isDestroyed?.()) {
+          this.scene.primitives.remove(item.model);
+          // Return to pool if not destroyed
+          const poolKey = `${item.url}|${item.lod}`;
+          if (!this.modelPool.has(poolKey)) this.modelPool.set(poolKey, []);
+          this.modelPool.get(poolKey)!.push(item.model);
+        }
+        this.live.delete(fid);
+      }
+      if (idx < toRemove.length) {
+        setTimeout(removeBatch, BATCH_DELAY);
+      }
+    };
+    removeBatch();
   }
 
   private enqueueMissing(hits: any[]) {
@@ -191,10 +235,12 @@ export class TreeLoadScheduler {
   /* ---------------- Loading ---------------- */
 
   private async processQueue() {
-    while (this.queue.length && this.loading < MAX_CONCURRENT) {
+    // Batch up to QUEUE_BATCH_SIZE trees per frame
+    let batch = 0;
+    while (this.queue.length && this.loading < MAX_CONCURRENT && batch < QUEUE_BATCH_SIZE) {
       const item = this.queue.shift()!;
       this.loading++;
-
+      batch++;
       this.loadTree(item)
         .catch(() => {})
         .finally(() => {
@@ -202,40 +248,74 @@ export class TreeLoadScheduler {
           setTimeout(() => this.processQueue(), QUEUE_THROTTLE_MS);
         });
     }
+    // If more remain, schedule next batch
+    if (this.queue.length && this.loading < MAX_CONCURRENT) {
+      setTimeout(() => this.processQueue(), QUEUE_THROTTLE_MS);
+    }
   }
 
-private async loadTree(item: QueueItem) {
-  const matrix = this.getCachedMatrix(item.meta, item.lod);
+  private async loadTree(item: QueueItem) {
+    const matrix = this.getCachedMatrix(item.meta, item.lod);
 
-  const model = await Model.fromGltfAsync({
-    url: new Resource({ url: item.url }),
-    modelMatrix: matrix,
-    allowPicking: false,
-    asynchronous: true
-  });
+    // Pool key by url+lod
+    const poolKey = `${item.url}|${item.lod}`;
+    let model: Model | undefined;
+    if (this.modelPool.has(poolKey) && this.modelPool.get(poolKey)!.length > 0) {
+      // Only use non-destroyed models from the pool
+      while (this.modelPool.get(poolKey)!.length > 0) {
+        const candidate = this.modelPool.get(poolKey)!.pop()!;
+        if (!candidate.isDestroyed?.()) {
+          model = candidate;
+          model.modelMatrix = matrix;
+          break;
+        }
+      }
+    }
+    if (!model) {
+      model = await Model.fromGltfAsync({
+        url: new Resource({ url: item.url }),
+        modelMatrix: matrix,
+        allowPicking: false,
+        asynchronous: true
+      });
+    }
 
-  // ❗ Abort outdated loads
-  if (!this.visible || item.version !== this.lodVersion) {
-    return;
+    // ❗ Abort outdated loads
+    if (!this.visible || item.version !== this.lodVersion) {
+      // Return model to pool if not used and not destroyed
+      if (model && !model.isDestroyed?.()) {
+        if (!this.modelPool.has(poolKey)) this.modelPool.set(poolKey, []);
+        this.modelPool.get(poolKey)!.push(model);
+      }
+      return;
+    }
+
+    // ❗ Remove previous model for this tree
+    const existing = this.live.get(item.meta.fid);
+    if (existing) {
+      if (!existing.model.isDestroyed?.()) {
+        this.scene.primitives.remove(existing.model);
+        // Return old model to pool if not destroyed
+        const oldKey = `${existing.url}|${existing.lod}`;
+        if (!this.modelPool.has(oldKey)) this.modelPool.set(oldKey, []);
+        this.modelPool.get(oldKey)!.push(existing.model);
+      }
+    }
+    if (existing && existing.lod === item.lod && existing.url === item.url) {
+      return;
+    }
+
+    // Only add to scene if not destroyed
+    if (!model.isDestroyed?.()) {
+      this.scene.primitives.add(model);
+    }
+
+    this.live.set(item.meta.fid, {
+      model,
+      url: item.url,
+      lod: item.lod
+    });
   }
-
-  // ❗ Remove previous model for this tree
-  const existing = this.live.get(item.meta.fid);
-  if (existing) {
-    this.scene.primitives.remove(existing.model);
-  }
-  if (existing && existing.lod === item.lod && existing.url === item.url) {
-    return;
-  }
-
-  this.scene.primitives.add(model);
-
-  this.live.set(item.meta.fid, {
-    model,
-    url: item.url,
-    lod: item.lod
-  });
-}
 
 
   /* ---------------- Matrix Cache ---------------- */

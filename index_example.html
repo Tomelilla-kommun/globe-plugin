@@ -28,7 +28,14 @@
       var globe = Globe({
         showGlobe: true,
         globeOnStart: true,
-        deactivateControls: ["measure"],
+        viewShed: true,
+        streetView: true,
+        fx: false,
+        cameraControls: true,
+        measure: true,
+        shadowDates: true,
+        flyTo: false,
+        deactivateControls: [],
         settings: {
           depthTestAgainstTerrain: true,
           enableAtmosphere: true,
