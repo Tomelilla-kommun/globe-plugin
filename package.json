@@ -17,7 +17,7 @@
     "start": "npm run prebuild-sass | run-p watch-js watch-sass",
     "watch-js": "webpack-dev-server --config ./tasks/webpack.dev.js --mode development",
     "watch-sass": "sass -w --load-path scss --load-path . scss/globe.scss ../origo/plugins/globe/globe.css",
-    "prebuild-sass": "sass --load-path scss --load-path . scss/globe.scss ../Tomelilla-kommun/origo/plugins/globe/globe.css",
+    "prebuild-sass": "sass --load-path scss --load-path . scss/globe.scss ../origo/plugins/globe/globe.css",
     "build": "webpack --config ./tasks/webpack.prod.js && npm run build-sass",
     "build-sass": "sass --load-path scss --load-path . scss/globe.scss build/globe.css"
   },

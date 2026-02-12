@@ -9,7 +9,7 @@ const cesiumWorkers = '../Build/Cesium/Workers';
 
 module.exports = merge(common, {
   output: {
-    path: `${__dirname}/../../Tomelilla-kommun/origo/plugins/globe`,
+    path: `${__dirname}/../../origo/plugins/globe`,
     publicPath: '/build',
     filename: 'globe.js',
     libraryTarget: 'var',
@@ -37,10 +37,10 @@ module.exports = merge(common, {
   plugins: [
     new CopyWebpackPlugin({
       patterns: [
-        { from: path.resolve(cesiumSource, cesiumWorkers), to: `C:\\Users\\SEIAMM\\Documents\\GitHub\\Tomelilla-kommun\\origo\\plugins\\globe\\cesiumassets\\Workers` },
-        { from: path.resolve(cesiumSource, 'Widgets'), to: `C:\\Users\\SEIAMM\\Documents\\GitHub\\Tomelilla-kommun\\origo\\plugins\\globe\\cesiumassets\\Widgets` },
-        { from: path.resolve(cesiumSource, 'Assets'), to: `C:\\Users\\SEIAMM\\Documents\\GitHub\\Tomelilla-kommun\\origo\\plugins\\globe\\cesiumassets\\Assets` },
-        { from: path.resolve(cesiumSource, 'ThirdParty'), to: `C:\\Users\\SEIAMM\\Documents\\GitHub\\Tomelilla-kommun\\origo\\plugins\\globe\\cesiumassets\\ThirdParty` }
+        { from: path.join(cesiumSource, cesiumWorkers), to: `${__dirname}/../../origo/plugins/globe/cesiumassets/Workers` },
+        { from: path.join(cesiumSource, 'Widgets'), to: `${__dirname}/../../origo/plugins/globe/cesiumassets/Widgets` },
+        { from: path.join(cesiumSource, 'Assets'), to: `${__dirname}/../../origo/plugins/globe/cesiumassets/Assets` },
+        { from: path.join(cesiumSource, 'ThirdParty'), to: `${__dirname}/../../origo/plugins/globe/cesiumassets/ThirdParty` }
       ],
     })
   ],
