@@ -25,10 +25,11 @@
     "cesium": "1.133",
     "compression": "^1.8.1",
     "flatpickr": "^4.6.13",
-    "ol": "^10.2.1",
+    "ol": "^10.5.0",
     "olcs": "^2.22.1",
     "origo-globe-plugin": "file:",
-    "proj4": "^2.12.1",
+    "proj4": "^2.17.0",
+    "rbush": "^4.0.1",
     "spdy": "^4.0.2",
     "typescript": "^5.9.2"
   },
