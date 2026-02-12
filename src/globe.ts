@@ -25,13 +25,42 @@ import StreetView from './functions/StreetView';
 import CameraControls from './functions/CameraControls';
 import dynamicResolutionScaling from './functions/dynamicResolutionScaling';
 import patchCollections from './functions/patchCollections';
+import quickTimePicker from './functions/quickTimePicker';
 import { setCameraHeight, getCameraHeight, setIsStreetMode, getIsStreetMode, isGlobeActive } from './globeState';
+
+type CleanupFn = () => void;
+
+class CleanupStack {
+  private stack: CleanupFn[] = [];
+
+  push(fn?: CleanupFn): void {
+    if (fn) {
+      this.stack.push(fn);
+    }
+  }
+
+  flush(): void {
+    while (this.stack.length) {
+      const dispose = this.stack.pop();
+      try {
+        dispose?.();
+      } catch (error) {
+        console.warn('Globe cleanup failed', error);
+      }
+    }
+  }
+}
 
 declare global {
   interface Window {
     Cesium: typeof Cesium;
     OLCesium: typeof OLCesium;
     oGlobe?: any;
+  }
+  interface ImportMeta {
+    hot?: {
+      dispose(callback: () => void): void;
+    };
   }
 }
 
@@ -72,7 +101,11 @@ interface GlobeOptions {
   globeOnStart?: boolean;
   showGlobe?: boolean;
   streetView?: boolean;
+  cameraControls?: boolean;
   viewShed?: boolean;
+  measure?: boolean;
+  flyTo?: boolean;
+  shadowDates?: boolean;
   fx?: boolean;
   resolutionScale?: number;
   settings?: GlobeSettings;
@@ -83,46 +116,197 @@ interface GlobeOptions {
   deactivateControls?: string[];
 }
 
+const DEFAULT_OPTIONS: Required<Pick<GlobeOptions,
+  'showGlobe' |
+  'streetView' |
+  'cameraControls' |
+  'viewShed' |
+  'measure' |
+  'flyTo' |
+  'shadowDates' |
+  'fx'
+>> & { deactivateControls: string[] } = {
+  showGlobe: true,
+  streetView: false,
+  cameraControls: false,
+  viewShed: false,
+  measure: false,
+  flyTo: false,
+  shadowDates: false,
+  fx: false,
+  deactivateControls: [],
+};
+
+const configureScene = (scene: Cesium.Scene, settings: GlobeSettings): void => {
+  // @ts-ignore: Ignore error if scene.clock is not writable
+  scene.clock = new Clock();
+  if (scene.skyAtmosphere) {
+    scene.skyAtmosphere.show = settings.enableAtmosphere ?? false;
+  }
+  scene.fog.enabled = !!settings.enableFog;
+
+  const shadowSettings = settings.shadows;
+  const shadowMap = scene.shadowMap;
+  if (shadowSettings && shadowMap) {
+    shadowMap.darkness = shadowSettings.darkness;
+    shadowMap.fadingEnabled = shadowSettings.fadingEnabled;
+    shadowMap.maximumDistance = shadowSettings.maximumDistance;
+    shadowMap.normalOffset = Boolean(shadowSettings.normalOffset);
+    shadowMap.size = shadowSettings.size;
+    shadowMap.softShadows = shadowSettings.softShadows;
+  }
+
+  const ambientOcclusion = scene.postProcessStages.ambientOcclusion;
+  if (ambientOcclusion) {
+    ambientOcclusion.enabled = false;
+    const viewModel = {
+      ambientOcclusionOnly: false,
+      intensity: 0.3,
+      bias: 0.2,
+      lengthCap: 30,
+      stepSize: 20.0,
+      blurStepSize: 4,
+    };
+    ambientOcclusion.uniforms.ambientOcclusionOnly = Boolean(viewModel.ambientOcclusionOnly);
+    ambientOcclusion.uniforms.intensity = Number(viewModel.intensity);
+    ambientOcclusion.uniforms.bias = Number(viewModel.bias);
+    ambientOcclusion.uniforms.lengthCap = viewModel.lengthCap;
+    ambientOcclusion.uniforms.stepSize = Number(viewModel.stepSize);
+    ambientOcclusion.uniforms.blurStepSize = Number(viewModel.blurStepSize);
+  }
+};
+
+const configureGlobeAppearance = (scene: Cesium.Scene, settings: GlobeSettings): void => {
+  const globe = scene.globe;
+  globe.depthTestAgainstTerrain = !!settings.depthTestAgainstTerrain;
+  globe.showGroundAtmosphere = !!settings.showGroundAtmosphere;
+  if (settings.skyBox) {
+    const url = settings.skyBox.url;
+    scene.skyBox = new SkyBox({
+      sources: {
+        positiveX: `${url}${settings.skyBox.images.pX}`,
+        negativeX: `${url}${settings.skyBox.images.nX}`,
+        positiveY: `${url}${settings.skyBox.images.pY}`,
+        negativeY: `${url}${settings.skyBox.images.nY}`,
+        positiveZ: `${url}${settings.skyBox.images.pZ}`,
+        negativeZ: `${url}${settings.skyBox.images.nZ}`
+      }
+    });
+  }
+};
+
+const loadTerrainProvider = async (
+  scene: Cesium.Scene,
+  options: { cesiumTerrainProvider?: string; cesiumIonassetIdTerrain?: number; cesiumIontoken?: string }
+): Promise<void> => {
+  const { cesiumTerrainProvider, cesiumIonassetIdTerrain, cesiumIontoken } = options;
+  if (cesiumTerrainProvider) {
+    scene.terrainProvider = await CesiumTerrainProvider.fromUrl(cesiumTerrainProvider, { requestVertexNormals: false });
+    return;
+  }
+  if (cesiumIonassetIdTerrain && cesiumIontoken) {
+    scene.terrainProvider = await CesiumTerrainProvider.fromUrl(
+      IonResource.fromAssetId(cesiumIonassetIdTerrain),
+      { requestVertexNormals: true }
+    );
+    return;
+  }
+  if (cesiumIontoken) {
+    scene.terrainProvider = await createWorldTerrainAsync({ requestVertexNormals: true });
+  }
+};
+
+const load3DTiles = (scene: Cesium.Scene, map: any, ionToken?: string): void => {
+  add3DTile(scene, map, ionToken ?? '');
+};
+
+const loadGltfAssets = (
+  scene: Cesium.Scene,
+  gltfAssets?: GLTFAsset[]
+): void => {
+  gltfAssets?.forEach(({ url, lat, lng, height, heightReference, animation }) => {
+    addGLTF(scene, url, lat, lng, height, heightReference, animation);
+  });
+};
+
 setCameraHeight(1.6);
 setIsStreetMode(false);
 window.Cesium = Cesium;
 window.OLCesium = OLCesium;
 
 const Globe = function Globe(options: GlobeOptions = {}) {
+  const resolvedOptions = {
+    resolutionScale: window.devicePixelRatio,
+    settings: {},
+    ...DEFAULT_OPTIONS,
+    ...options,
+  };
+
   let {
     target,
     globeOnStart,
-    showGlobe = true,
-    resolutionScale = window.devicePixelRatio,
-    settings = {},
+    showGlobe,
+    resolutionScale,
+    settings,
     cesiumTerrainProvider,
     cesiumIontoken,
     cesiumIonassetIdTerrain,
     gltf,
-    deactivateControls = [],
-    streetView = false,
-    viewShed = false,
-    fx = false,
-  } = options;
+    deactivateControls,
+    streetView,
+    viewShed,
+    cameraControls,
+    measure,
+    flyTo,
+    shadowDates,
+    fx,
+  } = resolvedOptions;
 
   let map: any;
   let viewer: any;
   let oGlobe: OLCesium;
   let oGlobeTarget: string;
-  let terrain: Cesium.TerrainProvider;
   let featureInfo: any;
   let scene: Cesium.Scene;
-  let fp: flatpickr.Instance;
+  let fp: flatpickr.Instance | null = null;
 
   let globeEl: OrigoElement;
   let globeButton: OrigoButton;
   let flatpickrButton: OrigoButton;
-  let viewshedButton: OrigoButton;
+  let viewshedButton: OrigoButton | null = null;
   let toggleShadowsButton: OrigoButton;
-  let quickTimePickerButton: OrigoButton;
-  let toggleFXButton: OrigoButton;
-  let htmlString: string;
-  let el: HTMLElement;
+  let quickTimePickerButton: OrigoButton | null = null;
+  let toggleFXButton: OrigoButton | null = null;
+
+  let cesiumHandler: Cesium.ScreenSpaceEventHandler | undefined;
+  let pickHandler: Cesium.ScreenSpaceEventHandler | undefined;
+
+  const cleanupStack = new CleanupStack();
+  const registerCleanup = (cleanup?: CleanupFn) => cleanupStack.push(cleanup);
+  const flushCleanups = () => cleanupStack.flush();
+  const registerOptionalCleanup = (maybeCleanup?: CleanupFn | void) => {
+    if (typeof maybeCleanup === 'function') {
+      registerCleanup(maybeCleanup);
+    }
+  };
+
+  const ownedDomNodes: HTMLElement[] = []; // track nodes mounted outside component root for cleanup
+  const trackNode = (node: HTMLElement) => { ownedDomNodes.push(node); return node; };
+  const cleanupDom = () => { ownedDomNodes.splice(0).forEach(n => n.remove()); };
+  const injectAtBodyStart = (markup: string): HTMLElement | undefined => {
+    if (typeof document === 'undefined' || !document.body) return undefined;
+    const template = document.createElement('div');
+    template.innerHTML = markup.trim();
+    const node = template.firstElementChild as HTMLElement | null;
+    if (!node) return undefined;
+    document.body.insertBefore(node, document.body.firstChild);
+    trackNode(node);
+    return node;
+  };
+  const cleanupCesiumHandlers = () => {
+    cesiumHandler?.destroy(); cesiumHandler = undefined;
+    pickHandler?.destroy(); pickHandler = undefined;
+  };
 
   const buttons: OrigoButton[] = [];
 
@@ -130,20 +314,27 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     Ion.defaultAccessToken = cesiumIontoken;
   }
 
+  const requestSceneRender = () => {
+    if (scene) {
+      scene.requestRender();
+    }
+  };
+
   const toggleGlobe = (): void => {
-    if (viewer.getProjectionCode() === 'EPSG:4326' || viewer.getProjectionCode() === 'EPSG:3857') {
-      console.log(!isGlobeActive(oGlobe))
+    if (!viewer || !oGlobe || !scene) {
+      console.warn('Globe toggle ignored because viewer or scene is unavailable');
+      return;
+    }
+
+    const projection = viewer.getProjectionCode();
+    if (projection === 'EPSG:4326' || projection === 'EPSG:3857') {
       oGlobe.setEnabled(!isGlobeActive(oGlobe));
-      const streetView = document.getElementById('streetView');
+      requestSceneRender();
+      const streetViewEl = document.getElementById('streetView');
       const controlUI = document.getElementById('controlUI');
       const oToolsBottom = document.getElementById('o-tools-bottom');
       const oConsole = document.getElementById('o-console');
       const oFooterMiddle = document.getElementsByClassName('o-footer-middle')[0] as HTMLElement;
-      const oMeasure = document.getElementsByClassName('o-measure')[0] as HTMLElement;
-
-      // if (oMeasure) {
-      //   oMeasure.style.display = isGlobeActive(oGlobe) ? 'none' : 'flex';
-      // }
       if (oFooterMiddle) {
         oFooterMiddle.style.paddingLeft = isGlobeActive(oGlobe) ? '5px' : '0px';
       }
@@ -154,8 +345,8 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         oConsole.style.display = isGlobeActive(oGlobe) ? 'none' : 'flex';
       }
 
-      if (streetView && controlUI) {
-        streetView.style.display = !isGlobeActive(oGlobe) ? 'none' : 'flex';
+      if (streetViewEl && controlUI) {
+        streetViewEl.style.display = !isGlobeActive(oGlobe) ? 'none' : 'flex';
         controlUI.style.display = !isGlobeActive(oGlobe) ? 'none' : 'flex';
       }
     } else {
@@ -168,10 +359,10 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     globeButtonEl?.classList.toggle('active');
 
     const flatpickrButtonEl = document.getElementById(flatpickrButton.getId());
-    const viewshedButtonEl = document.getElementById(viewshedButton.getId());
+    const viewshedButtonEl = viewshedButton ? document.getElementById(viewshedButton.getId()) : null;
     const toggleShadowsButtonEl = document.getElementById(toggleShadowsButton.getId());
-    const quickTimePickerButtonEl = document.getElementById(quickTimePickerButton.getId());
-    const toggleFXButtonEl = document.getElementById(toggleFXButton.getId());
+    const quickTimePickerButtonEl = quickTimePickerButton ? document.getElementById(quickTimePickerButton.getId()) : null;
+    const toggleFXButtonEl = toggleFXButton ? document.getElementById(toggleFXButton.getId()) : null;
 
     const isActive = globeButtonEl?.classList.contains('active') ?? false;
     flatpickrButtonEl?.classList.toggle('hidden', !isActive);
@@ -181,16 +372,20 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     toggleFXButtonEl?.classList.toggle('hidden', !isActive);
   };
 
+  let hasActivatedOnStart = false;
+
   const helpers = {
     activeGlobeOnStart: (): void => {
-      if (globeOnStart) {
-        toggleGlobe();
-        toggleButtons();
-      }
+      if (!globeOnStart || hasActivatedOnStart || !oGlobe) return;
+      hasActivatedOnStart = true;
+      toggleGlobe();
+      toggleButtons();
+      helpers.setActiveControls(oGlobe, viewer);
     },
     showGlobeOption: (): void => {
       if (!showGlobe && scene) {
         scene.globe.show = false;
+        requestSceneRender();
       }
     },
     cesiumCredits: (): void => {
@@ -198,6 +393,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       if (container) container.style.display = 'none';
     },
     setActiveControls: (getGlobe: OLCesium, v: any): void => {
+      if (!v) return;
       deactivateControls.forEach((name) => {
         const control = v.getControlByName(name);
         if (!control) console.error(`No control named "${name}" to hide/unhide for globe control`);
@@ -205,24 +401,65 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         else control.unhide();
       });
     },
-    timeSetter: (): void => {
+    timeSetter: (): CleanupFn | void => {
+      if (!target) return;
+      const parent = document.getElementById(target);
+      if (!parent) return;
       const flatpickrEl = Origo.ui.Element({ tagName: 'div', cls: 'flatpickrEl z-index-ontop-top-times20' });
-      document.getElementById(target!)?.appendChild(Origo.ui.dom.html(flatpickrEl.render()));
-      fp = flatpickr(document.getElementById(flatpickrEl.getId())!, {
+      const markup = flatpickrEl.render();
+      const htmlNode = Origo.ui.dom.html(markup) as (HTMLElement | DocumentFragment | null);
+      const targetElement = htmlNode instanceof HTMLElement
+        ? htmlNode
+        : htmlNode?.firstElementChild as HTMLElement | null;
+      if (!htmlNode || !targetElement) return;
+      parent.appendChild(htmlNode);
+      trackNode(targetElement);
+      fp = flatpickr(targetElement, {
         enableTime: true,
         defaultDate: new Date(),
         enableSeconds: true,
         disableMobile: true,
         time_24hr: true,
       });
+      return () => {
+        fp?.destroy();
+        fp = null;
+        targetElement.remove();
+      };
     },
     flyTo: (destination: Cesium.Cartesian3, duration: number, orientation = { heading: 0, pitch: 0, roll: 0 }) => {
       if (getIsStreetMode()) return;
-      scene.camera.flyTo({
-        destination,
-        duration,
-        orientation
-      });
+      if (flyTo) {
+        scene.camera.flyTo({
+          destination,
+          duration,
+          orientation,
+          complete: requestSceneRender
+        });
+      } else {
+        if (scene && scene.camera) {
+          const camera = scene.camera;
+          const destination = Cesium.Cartesian3.clone(camera.positionWC);
+          const orientation = {
+            heading: camera.heading,
+            pitch: camera.pitch,
+            roll: camera.roll
+          };
+
+          const freezeHandler = camera.changed.addEventListener(() => {
+            camera.setView({
+              destination,
+              orientation
+            });
+          });
+
+          setTimeout(() => {
+            if (freezeHandler) {
+              freezeHandler();
+            }
+          }, 600);
+        }
+      }
     },
     setView: (
       destination: Cesium.Cartesian3,
@@ -233,8 +470,10 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         destination,
         orientation
       });
+      requestSceneRender();
     },
     addSvgIcons: () => {
+      if (document.getElementById('globe-svg-sprite')) return;
       const svgIcons = `
       <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
         <symbol viewBox="0 0 24 24" id="ic_cube_24px">
@@ -247,12 +486,14 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         </symbol>
       </svg>
       `;
-      const div = document.createElement('div');
-      div.innerHTML = svgIcons;
-      document.body.insertBefore(div, document.body.childNodes[0]);
+      const spriteWrapper = document.createElement('div');
+      spriteWrapper.id = 'globe-svg-sprite';
+      spriteWrapper.innerHTML = svgIcons;
+      document.body.insertBefore(spriteWrapper, document.body.firstChild ?? null);
+      trackNode(spriteWrapper);
     },
-    addStreetView:(streetView: boolean, handler: Cesium.ScreenSpaceEventHandler, globe: any) => {
-      if (streetView) {
+    addStreetView:(streetViewEnabled: boolean, handler: Cesium.ScreenSpaceEventHandler, globe: any): CleanupFn | void => {
+      if (streetViewEnabled) {
         const streetViewHtml = `
         <div id="streetView" style="
           position: absolute;
@@ -299,229 +540,152 @@ const Globe = function Globe(options: GlobeOptions = {}) {
           </div>
         </div>
         `;
-        const div = document.createElement('div');
-        div.innerHTML = streetViewHtml;
-        document.body.insertBefore(div, document.body.childNodes[0]);
-        StreetView(scene, handler, globe);
+        const node = injectAtBodyStart(streetViewHtml);
+        void StreetView(scene, handler, globe);
+        return () => node?.remove();
       }
+      return undefined;
     },
-    addViewShed:(viewShed: boolean, handler: Cesium.ScreenSpaceEventHandler) => {
-      if (viewShed && scene) {
-        ViewShed(scene, viewshedButton, handler);
+    addViewShed:(viewShedEnabled: boolean, handler: Cesium.ScreenSpaceEventHandler, button: OrigoButton | null) => {
+      if (viewShedEnabled && scene && button) {
+        ViewShed(scene, button, handler);
       }
     },
     addControls: () => {
-      const cameraControlHtml = `
-        <div id="controlUI" style="
-          position: absolute;
-          bottom: 35px;
-          left: 10px;
-          z-index: 99;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-          font-size: 1rem;
-          font-weight: 400;
-          line-height: 1.5;
-          -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
-          box-sizing: border-box;
-          background: rgba(255, 255, 255, 0.7);
-          border-radius: 4px;
-          display: inline-block;
-          padding: 3px;
-        ">
-          <div id="camera-controls" style="
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            border: 1px solid #424242;
+      if (cameraControls) {
+        const cameraControlHtml = `
+          <div id="controlUI" style="
+            position: absolute;
+            bottom: 35px;
+            left: 10px;
+            z-index: 99;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            font-size: 1rem;
+            font-weight: 400;
+            line-height: 1.5;
+            -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+            box-sizing: border-box;
+            background: rgba(255, 255, 255, 0.7);
             border-radius: 4px;
-            color: #424242;
+            display: inline-block;
+            padding: 3px;
           ">
-            <button id="cam-up" style="margin-bottom: -17px; margin-top: -6px; background: none; border: none; cursor: pointer; padding: 4px;">
-              <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(-90deg);">
-                <use xlink:href="#ic_chevron_right_24px"></use>
-              </svg>
-            </button>
-            <div style="display: flex; gap: 4px;">
-              <button id="cam-left" style="margin-left: -7px; background: none; border: none; cursor: pointer; padding: 4px;">
-                <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(180deg);">
+            <div id="camera-controls" style="
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+              border: 1px solid #424242;
+              border-radius: 4px;
+              color: #424242;
+            ">
+              <button id="cam-up" style="margin-bottom: -17px; margin-top: -6px; background: none; border: none; cursor: pointer; padding: 4px;">
+                <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(-90deg);">
                   <use xlink:href="#ic_chevron_right_24px"></use>
                 </svg>
               </button>
-              <button id="cam-right" style="margin-right: -6px; margin-left: -3px; background: none; border: none; cursor: pointer; padding: 4px;">
-                <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)">
+              <div style="display: flex; gap: 4px;">
+                <button id="cam-left" style="margin-left: -7px; background: none; border: none; cursor: pointer; padding: 4px;">
+                  <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(180deg);">
+                    <use xlink:href="#ic_chevron_right_24px"></use>
+                  </svg>
+                </button>
+                <button id="cam-right" style="margin-right: -6px; margin-left: -3px; background: none; border: none; cursor: pointer; padding: 4px;">
+                  <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)">
+                    <use xlink:href="#ic_chevron_right_24px"></use>
+                  </svg>
+                </button>
+              </div>
+              <button id="cam-down" style="margin-top: -19px; margin-bottom: -6px; background: none; border: none; cursor: pointer; padding: 4px;">
+                <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(90deg);">
                   <use xlink:href="#ic_chevron_right_24px"></use>
                 </svg>
               </button>
             </div>
-            <button id="cam-down" style="margin-top: -19px; margin-bottom: -6px; background: none; border: none; cursor: pointer; padding: 4px;">
-              <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(90deg);">
-                <use xlink:href="#ic_chevron_right_24px"></use>
-              </svg>
-            </button>
           </div>
-        </div>
-      `;
-      const div = document.createElement('div');
-      div.innerHTML = cameraControlHtml;
-      document.body.insertBefore(div, document.body.childNodes[0]);
-    },
-    pickedFeatureStyle: (): void => {
-      const handler = new ScreenSpaceEventHandler(scene.canvas);
-
-      if (PostProcessStageLibrary.isSilhouetteSupported(scene)) {
-        const silhouette = PostProcessStageLibrary.createEdgeDetectionStage();
-        silhouette.uniforms.color = Color.ROYALBLUE;
-        silhouette.uniforms.length = 0.01;
-        silhouette.selected = [];
-
-        scene.postProcessStages.add(PostProcessStageLibrary.createSilhouetteStage([silhouette]));
-
-        let lastPickTime = 0;
-
-        handler.setInputAction(({ position }: { position: Cesium.Cartesian2 }) => {
-          const now = performance.now();
-          if (now - lastPickTime < 120) return;
-          lastPickTime = now;
-
-          // Only pick if position exists
-          if (position) {
-            const pickedFeature = scene.pick(position);
-            silhouette.selected = pickedFeature ? [pickedFeature] : [];
-          }
-        }, ScreenSpaceEventType.MOUSE_MOVE);
+        `;
+        const node = injectAtBodyStart(cameraControlHtml);
+        return () => node?.remove();
       }
+      return undefined;
     },
-    addMeasureTool: (scene: Cesium.Scene): void => {
+    pickedFeatureStyle: (handler: Cesium.ScreenSpaceEventHandler): CleanupFn | void => {
+      if (!PostProcessStageLibrary.isSilhouetteSupported(scene)) return;
+
+      const silhouette = PostProcessStageLibrary.createEdgeDetectionStage();
+      silhouette.uniforms.color = Color.ROYALBLUE;
+      silhouette.uniforms.length = 0.01;
+      silhouette.selected = [];
+
+      const silhouetteStage = PostProcessStageLibrary.createSilhouetteStage([silhouette]);
+      scene.postProcessStages.add(silhouetteStage);
+
+      let lastPickTime = 0;
+      const mouseMoveEvent = ScreenSpaceEventType.MOUSE_MOVE;
+      const onMove = ({ position }: { position: Cesium.Cartesian2 }) => {
+        const now = performance.now();
+        if (now - lastPickTime < 120) return;
+        lastPickTime = now;
+
+        const pickedFeature = position ? scene.pick(position) : undefined;
+        silhouette.selected = pickedFeature ? [pickedFeature] : [];
+        requestSceneRender();
+      };
+      handler.setInputAction(onMove, mouseMoveEvent);
+
+      return () => {
+        handler.removeInputAction(mouseMoveEvent);
+        scene.postProcessStages.remove(silhouetteStage);
+      };
+    },
+    addMeasureTool: (scene: Cesium.Scene): (() => void) | undefined => {
+      if (!measure) return;
+
+      const button = document.getElementsByClassName('o-measure')[0] as HTMLElement | undefined;
+      if (!button) return;
+
       let tool: ReturnType<typeof measureTool> | null = null;
 
-      const button = document.getElementsByClassName('o-measure')[0] as HTMLElement;
+      const originalOnClick = button.onclick; // keep default 2D handler
+      button.onclick = null; // avoid duplicate firing when globe mode hijacks the button
 
-      const originalOnClick = button.onclick;
-      button.onclick = null;
+      const onClick = (e: Event) => {
+        if (!isGlobeActive(oGlobe)) {
+          originalOnClick?.call(button, e as any);
+          return;
+        }
 
-      button.addEventListener(
-        'click',
-        (e) => {
-          if (!isGlobeActive(oGlobe)) {
-            // Let Origo behave exactly as before
-            originalOnClick?.call(button, e);
-            return;
-          }
+        // Consume the event so Origo's 2D logic stays disabled while the globe is active
+        e.preventDefault();
+        (e as any).stopImmediatePropagation?.();
+        e.stopPropagation();
 
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          e.stopPropagation();
+        if (!tool) {
+          tool = measureTool(scene);
+          tool.measureDistance();
+          button.classList.add('active');
+        } else {
+          tool.destroy();
+          tool = null;
+          button.classList.remove('active');
+        }
 
-          // --- Globe behavior ---
-          if (!tool) {
-            tool = measureTool(scene);
-            tool.measureDistance();
-            button.classList.add('active');
-          } else {
-            tool.destroy();
-            tool = null;
-            button.classList.remove('active');
-          }
-        },
-        true // 👈 capture phase (VERY important)
-      );
-    }
-
-
-  };
-
-  const assets = {
-    terrainProviders: async (): Promise<void> => {
-      if (cesiumTerrainProvider) {
-        terrain = await CesiumTerrainProvider.fromUrl(cesiumTerrainProvider, { requestVertexNormals: false});
-        scene.terrainProvider = terrain;
-      } else if (cesiumIonassetIdTerrain && cesiumIontoken) {
-        terrain = await CesiumTerrainProvider.fromUrl(IonResource.fromAssetId(cesiumIonassetIdTerrain), { requestVertexNormals: true });
-        scene.terrainProvider = terrain;
-      } else if (cesiumIontoken) {
-        terrain = await createWorldTerrainAsync({ requestVertexNormals: true });
-        scene.terrainProvider = terrain;
-      }
-    },
-    cesium3DtilesProviders: (): void => { add3DTile(scene, map, cesiumIontoken ? cesiumIontoken : ""); },
-    gltfProviders: (): void => {
-      gltf?.forEach(({ url, lat, lng, height, heightReference, animation }) => {
-        addGLTF(scene, url, lat, lng, height, heightReference, animation);
-      });
-    },
-  };
-
-
-  const cesiumSettings = {
-    // Configure options for Scene
-    scene: () => {
-      // @ts-ignore: Ignore error if scene.clock is not writable
-      scene.clock = new Clock();
-      // Enables/disables atmosphere
-      if (scene.skyAtmosphere) {
-        scene.skyAtmosphere.show = settings.enableAtmosphere ?? false;
-      }
-      // Enables fog/disables
-      scene.fog.enabled = !!settings.enableFog;
-      // Shadow settings
-      const shadowSettings = settings.shadows;
-      const shadowMap = scene.shadowMap;
-      if (shadowSettings) {
-        shadowMap.darkness = shadowSettings.darkness;
-        shadowMap.fadingEnabled = shadowSettings.fadingEnabled;
-        shadowMap.maximumDistance = shadowSettings.maximumDistance;
-        shadowMap.normalOffset = Boolean(shadowSettings.normalOffset);
-        shadowMap.size = shadowSettings.size;
-        shadowMap.softShadows = shadowSettings.softShadows;
-      }
-
-      var viewModel = {
-        ambientOcclusionOnly: false,
-        intensity: 0.3,
-        bias: 0.2,
-        lengthCap: 30,
-        stepSize: 20.0,
-        blurStepSize: 4,
+        requestSceneRender();
       };
-      const ambientOcclusion = scene.postProcessStages.ambientOcclusion;
-      ambientOcclusion.enabled = false;
 
-      ambientOcclusion.uniforms.ambientOcclusionOnly = Boolean(
-        viewModel.ambientOcclusionOnly
-      );
-      ambientOcclusion.uniforms.intensity = Number(viewModel.intensity);
-      ambientOcclusion.uniforms.bias = Number(viewModel.bias);
-      ambientOcclusion.uniforms.lengthCap = (viewModel.lengthCap);
-      ambientOcclusion.uniforms.stepSize = Number(viewModel.stepSize);
-      ambientOcclusion.uniforms.blurStepSize = Number(viewModel.blurStepSize);
+      button.addEventListener('click', onClick, true); // capture ensures we intercept before Origo handlers
+
+      return () => {
+        button.removeEventListener('click', onClick, true);
+
+        tool?.destroy();
+        tool = null;
+
+        button.onclick = originalOnClick ?? null; // restore default handler
+        button.classList.remove('active');
+      };
     },
-    // Configure options for Globe
-    globe: () => {
-      const globe = scene.globe;
-
-      // scene.requestRenderMode = true;
-
-      // Enables/disables depthTestAgainstTerrain
-      globe.depthTestAgainstTerrain = !!settings.depthTestAgainstTerrain;
-      // Enables/disables enableGroundAtmosphere
-      globe.showGroundAtmosphere = !!settings.showGroundAtmosphere;
-      // Options to set different skyboxes
-      if (settings.skyBox) {
-        const url = settings.skyBox.url;
-        scene.skyBox = new SkyBox({
-          sources: {
-            positiveX: `${url}${settings.skyBox.images.pX}`,
-            negativeX: `${url}${settings.skyBox.images.nX}`,
-            positiveY: `${url}${settings.skyBox.images.pY}`,
-            negativeY: `${url}${settings.skyBox.images.nY}`,
-            positiveZ: `${url}${settings.skyBox.images.pZ}`,
-            negativeZ: `${url}${settings.skyBox.images.nZ}`
-          }
-        });
-      }
-      settings.skyBox = false;
-    }
   };
+
 
   return Origo.ui.Component({
     name: 'globe',
@@ -531,42 +695,50 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       oGlobeTarget = viewer.getId();
       map = viewer.getMap();
       featureInfo = viewer.getControlByName('featureInfo');
-      // Init flatpickr to set the datetime in oGlobe.time
-      helpers.timeSetter();
-      // Init OLCesium
-      oGlobe = new window.OLCesium({
-        map,
-        target: oGlobeTarget,
-        time() {
-          return JulianDate.fromDate(new Date((fp.element as HTMLInputElement).value));
-        }
-      });
-      // OLCesium needs to be global
-      window.oGlobe = oGlobe;
-      // Gets Scene
+      registerOptionalCleanup(helpers.timeSetter());
+      if (!oGlobe) {
+        oGlobe = new window.OLCesium({
+          map,
+          target: oGlobeTarget,
+          time() {
+            const value = (fp?.input as HTMLInputElement | undefined)?.value;
+            return JulianDate.fromDate(value ? new Date(value) : new Date());
+          }
+        });
+      }
       scene = oGlobe.getCesiumScene();
-      // setResolutionScale as configuration option
-      dynamicResolutionScaling(oGlobe, scene);
+      window.oGlobe = oGlobe;
+      scene.requestRenderMode = true;
+      scene.maximumRenderTimeChange = Infinity;
+      const resolutionScaler = dynamicResolutionScaling(oGlobe, scene,{ forceLowEnd: false, forceHighEnd: false, debugLogs: true });
+      registerCleanup(() => resolutionScaler?.dispose?.());
 
-      scene.postRender.addEventListener(() => patchCollections(scene));
+      const onPostRender = () => patchCollections(scene);
+      scene.postRender.addEventListener(onPostRender);
+      registerCleanup(() => scene.postRender.removeEventListener(onPostRender));
 
       const handler = new ScreenSpaceEventHandler(scene.canvas);
+      cesiumHandler = handler;
 
-      helpers.addStreetView(streetView, handler, oGlobe);
-      helpers.addViewShed(viewShed, handler);
-      helpers.addControls();
+      registerOptionalCleanup(helpers.addStreetView(streetView, handler, oGlobe));
+      helpers.addViewShed(viewShed, handler, viewshedButton);
+      registerOptionalCleanup(helpers.addControls());
       helpers.showGlobeOption();
       helpers.cesiumCredits();
       helpers.addSvgIcons();
       helpers.setActiveControls(oGlobe, viewer);
-      helpers.pickedFeatureStyle();
-      helpers.addMeasureTool(scene);
+      registerOptionalCleanup(helpers.pickedFeatureStyle(handler));
+      registerOptionalCleanup(helpers.addMeasureTool(scene));
 
       CameraControls(scene);
       getFeatureInfo(scene, viewer, map, featureInfo, helpers.flyTo);
 
-      Object.values(cesiumSettings).forEach((s) => s());
-      Object.values(assets).forEach((a) => a());
+      configureScene(scene, settings);
+      configureGlobeAppearance(scene, settings);
+      loadTerrainProvider(scene, { cesiumTerrainProvider, cesiumIonassetIdTerrain, cesiumIontoken })
+        .catch((error) => console.error('Failed to load terrain provider', error));
+      load3DTiles(scene, map, cesiumIontoken);
+      loadGltfAssets(scene, gltf);
 
       this.on('render', this.onRender as () => void);
       this.addComponents(buttons);
@@ -580,9 +752,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       globeButton = Origo.ui.Button({
         cls: 'o-globe padding-small margin-bottom-smaller icon-smaller round light box-shadow',
         click() {
-          // Toggles globe on/off
           toggleGlobe();
-          // Toggles globe subbuttons unhide/hide
           toggleButtons();
           helpers.setActiveControls(oGlobe, viewer);
         },
@@ -595,7 +765,8 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       flatpickrButton = Origo.ui.Button({
         cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow hidden',
         click() {
-          let toggleFlatpickrButtonEl = document.getElementById(flatpickrButton.getId());
+          if (!fp) return;
+          const toggleFlatpickrButtonEl = document.getElementById(flatpickrButton.getId());
           if (toggleFlatpickrButtonEl) {
             toggleFlatpickrButtonEl.classList.toggle('active');
             toggleFlatpickrButtonEl.classList.contains('active') ? fp.open() : fp.close();
@@ -607,95 +778,43 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       });
       buttons.push(flatpickrButton);
 
-      viewshedButton = Origo.ui.Button({
-        cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow',
-        click() {
-          const el = document.getElementById(viewshedButton.getId());
-          if (el) {
-            el.classList.toggle('active');
-          }
-        },
-        icon: '#ic_visibility_24px',
-        tooltipText: 'Siktanalys',
-        tooltipPlacement: 'east'
-      });
-      if (viewShed) buttons.push(viewshedButton);
-
-      const quickTimeContainer = document.createElement('div');
-      quickTimeContainer.classList.add('quick-time-container', 'origo-popup', 'animate');
-      quickTimeContainer.style.display = 'none';
-      quickTimeContainer.style.position = 'absolute';
-      quickTimeContainer.style.zIndex = '9999';
-      quickTimeContainer.style.padding = '10px';
-      quickTimeContainer.style.background = '#fff';
-      quickTimeContainer.style.boxShadow = '0 2px 6px rgba(0,0,0,0.3)';
-      quickTimeContainer.style.borderRadius = '6px';
-      document.body.appendChild(quickTimeContainer);
-
-      // Fill it with the time buttons
-      const predefinedTimes = [
-        { date: '2025-03-20', label: '20 Mars' },
-        { date: '2025-06-21', label: '21 Juni' },
-        { date: '2025-09-22', label: '22 September' },
-        { date: '2025-09-23', label: '23 September' },
-        { date: '2025-12-21', label: '21 December' }
-      ];
-      const hours = [9, 12, 16];
-
-      predefinedTimes.forEach((dateObj) => {
-        const dateLabel = document.createElement('div');
-        dateLabel.innerText = dateObj.label;
-        dateLabel.style.fontWeight = 'bold';
-        quickTimeContainer.appendChild(dateLabel);
-
-        hours.forEach((hour) => {
-          const btn = document.createElement('button');
-          btn.innerText = `${hour}:00`;
-          btn.classList.add('quick-time-button', 'small');
-          btn.style.marginRight = '4px';
-          btn.addEventListener('click', () => {
-            const selectedDate = new Date(dateObj.date);
-            selectedDate.setHours(hour, 0, 0);
-            fp.setDate(selectedDate, true);
-            quickTimeContainer.style.display = 'none'; // Hide after click
-          });
-          quickTimeContainer.appendChild(btn);
-        });
-
-        const spacer = document.createElement('div');
-        spacer.style.marginBottom = '10px';
-        quickTimeContainer.appendChild(spacer);
-      });
-
-      quickTimePickerButton = Origo.ui.Button({
-        cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow quick-time-button',
-        click() {
-          const isVisible = quickTimeContainer.style.display === 'block';
-          quickTimeContainer.style.display = isVisible ? 'none' : 'block';
-      
-          if (!isVisible) {
-            const btnEl = document.getElementById(quickTimePickerButton.getId());
-            if (btnEl) {
-              const rect = btnEl.getBoundingClientRect();
-              quickTimeContainer.style.left = `${rect.right + 10}px`;
-              quickTimeContainer.style.top = `${rect.top}px`;
+      if (viewShed) {
+        viewshedButton = Origo.ui.Button({
+          cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow',
+          click() {
+            if (!viewshedButton) return;
+            const el = document.getElementById(viewshedButton.getId());
+            if (el) {
+              el.classList.toggle('active');
             }
+          },
+          icon: '#ic_visibility_24px',
+          tooltipText: 'Siktanalys',
+          tooltipPlacement: 'east'
+        });
+        buttons.push(viewshedButton);
+      }
+
+      if (shadowDates) {
+        const quickPicker = quickTimePicker(() => fp);
+        if (quickPicker) {
+          quickTimePickerButton = quickPicker.button;
+          if (quickTimePickerButton) {
+            buttons.push(quickTimePickerButton);
           }
-        },
-        icon: '#ic_clock-time-four_24px',
-        tooltipText: 'Snabbval för tid',
-        tooltipPlacement: 'east'
-      });
-      buttons.push(quickTimePickerButton);
+          registerCleanup(quickPicker.dispose);
+        }
+      }
 
       toggleShadowsButton = Origo.ui.Button({
         cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow',
         click() {
-          let toggleShadowsButtonEl = document.getElementById(toggleShadowsButton.getId());
-          if (toggleShadowsButtonEl) {
-            toggleShadowsButtonEl.classList.toggle('active');
-            toggleShadowsButtonEl.classList.contains('active') ? scene.shadowMap.enabled = true : scene.shadowMap.enabled = false;
-          }
+          if (!scene) return;
+          const toggleShadowsButtonEl = document.getElementById(toggleShadowsButton.getId());
+          if (!toggleShadowsButtonEl || !scene.shadowMap) return;
+          toggleShadowsButtonEl.classList.toggle('active');
+          scene.shadowMap.enabled = toggleShadowsButtonEl.classList.contains('active');
+          requestSceneRender();
         },
         icon: '#ic_box-shadow_24px',
         tooltipText: 'Slå på/av skuggor',
@@ -703,77 +822,81 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       });
       buttons.push(toggleShadowsButton);
 
-      toggleFXButton = Origo.ui.Button({
-        cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow active',
-        click() {
-          const el = document.getElementById(toggleFXButton.getId());
-          let active = false;
-          if (el) {
-            active = el.classList.toggle('active');
-          }
+      if (fx) {
+        toggleFXButton = Origo.ui.Button({
+          cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow active',
+          click() {
+            if (!toggleFXButton || !scene) return;
+            const el = document.getElementById(toggleFXButton.getId());
+            let active = false;
+            if (el) {
+              active = el.classList.toggle('active');
+            }
 
-          // scene.fog.enabled = active && !!settings.enableFog;
-          const shadowMap = scene.shadowMap;
-          const shadowSettings = settings.shadows;
-          // shadowMap.fadingEnabled = active ? shadowSettings.fadingEnabled : false;
-          shadowMap.normalOffset = active && shadowSettings ? Boolean(shadowSettings.normalOffset) : false;
-          shadowMap.size = active && shadowSettings ? shadowSettings.size : 1024;
-          // shadowMap.softShadows = active ? shadowSettings.softShadows : false;
-          // scene.postProcessStages.ambientOcclusion.enabled = active;
-        },
-        icon: '#ic_cube_24px',
-        tooltipText: 'Toggle FX Settings',
-        tooltipPlacement: 'east'
-      });
-      if (fx) buttons.push(toggleFXButton);
+            const shadowMap = scene.shadowMap;
+            const shadowSettings = settings.shadows;
+            if (!shadowMap) return;
+            shadowMap.normalOffset = active && shadowSettings ? Boolean(shadowSettings.normalOffset) : false;
+            shadowMap.size = active && shadowSettings ? shadowSettings.size : 1024;
+            requestSceneRender();
+          },
+          icon: '#ic_cube_24px',
+          tooltipText: 'Toggle FX Settings',
+          tooltipPlacement: 'east'
+        });
+        buttons.push(toggleFXButton);
+      }
     },
     render() {
 
       const globeElDomTar = document.getElementById(target ?? '');
-      if(globeElDomTar) {
-        htmlString = `${globeEl.render()}`;
-        el = Origo.ui.dom.html(htmlString);
-        globeElDomTar.appendChild(el);
+      if (globeElDomTar) {
+        const globeMarkup = globeEl.render();
+        const globeNode = Origo.ui.dom.html(globeMarkup);
+        globeElDomTar.appendChild(globeNode);
       }
 
       const globeElDom = document.getElementById(globeEl.getId());
       if (globeElDom) {
+        const appendButton = (button?: OrigoButton | null) => {
+          if (!button) return;
+          const markup = button.render();
+          const node = Origo.ui.dom.html(markup);
+          globeElDom.appendChild(node);
+        };
 
-        htmlString = globeButton.render();
-        el = Origo.ui.dom.html(htmlString);
-        globeElDom.appendChild(el);
+        appendButton(globeButton);
+        appendButton(flatpickrButton);
 
-        htmlString = flatpickrButton.render();
-        el = Origo.ui.dom.html(htmlString);
-        globeElDom.appendChild(el);
-
-        htmlString = quickTimePickerButton.render();
-        el = Origo.ui.dom.html(htmlString);
-        globeElDom.appendChild(el);
+        if (shadowDates) {
+          appendButton(quickTimePickerButton);
+        }
 
         if (viewShed) {
-          htmlString = viewshedButton.render();
-          el = Origo.ui.dom.html(htmlString);
-          globeElDom.appendChild(el);
+          appendButton(viewshedButton);
         }
 
-        htmlString = toggleShadowsButton.render();
-        el = Origo.ui.dom.html(htmlString);
-        globeElDom.appendChild(el);
+        appendButton(toggleShadowsButton);
 
         if (fx) {
-          htmlString = toggleFXButton.render();
-          el = Origo.ui.dom.html(htmlString);
-          globeElDom.appendChild(el);
+          appendButton(toggleFXButton);
         }
       }
-      console.log('globe render');
 
       helpers.activeGlobeOnStart();
       this.dispatch('render');
 
-      // forceNoDepthTestForIconsAndText(scene);
+    },
+    onRemove() {
+      // disable 3D first (releases some things in olcs)
+      try { oGlobe?.setEnabled(false); } catch (error) {
+        console.warn('Failed to disable globe on remove', error);
+      }
 
+      flushCleanups();
+      cleanupCesiumHandlers();
+      cleanupDom();
+      hasActivatedOnStart = false;
     },
     isGlobeActive: (): boolean => isGlobeActive(oGlobe),
     threedtiletype: () => threedtile,
@@ -781,5 +904,6 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     globalOLCesium: () => OLCesium,
   });
 };
+
 
 export default Globe;

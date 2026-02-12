@@ -5,199 +5,383 @@ import {
   Color,
   Cesium3DTileStyle,
   Cartesian3,
-  Cartographic,
-  sampleTerrainMostDetailed,
   ShadowMode,
   Model,
   Transforms,
   HeadingPitchRoll,
   Ellipsoid,
+  HeightReference,
   Primitive,
   GeometryInstance,
   PolygonGeometry,
   PolygonHierarchy,
   ColorGeometryInstanceAttribute,
-  PerInstanceColorAppearance,
-  Math as CesiumMath
+  PerInstanceColorAppearance
 } from 'cesium';
 import GeoJSON from 'ol/format/GeoJSON';
 import Map from 'ol/Map';
 import { loadTrees } from '../functions/loadTrees';
 
+interface ExtrusionConfig {
+  color?: string;
+  opacity?: number;
+  groundAttr: string;
+  roofAttr: string;
+}
+
+interface ModelDefinition {
+  fileName: string;
+  lat: number;
+  lng: number;
+  height?: number;
+  heightReference?: string;
+  rotHeading?: number;
+  rotPitch?: number;
+  rotRoll?: number;
+}
+
 interface LayerOptions {
   dataSource?: string;
   name?: string;
-  extrusion?: any;
-  model?: any;
+  extrusion?: ExtrusionConfig;
+  model?: unknown;
+  models?: ModelDefinition[];
   visible?: boolean;
   url?: string | number;
-  maximumScreenSpaceError?: number;
   showOutline?: boolean;
   outlineColor?: string;
-  style?: any;
-  filter?: any;
-  CesiumModels?: any[];
-  CesiumExtrusions?: any[];
-  [key: string]: any;
+  style?: Record<string, unknown> | 'default';
+  filter?: boolean;
+  CesiumModels?: Model[];
+  CesiumExtrusions?: Primitive[];
+  [key: string]: unknown;
 }
+
+type ThreedTileLayer = LayerOptions & {
+  get: <T = unknown>(key: string) => T;
+  CesiumTileset?: Cesium3DTileset;
+  CesiumModels?: Model[];
+  CesiumExtrusions?: Primitive[];
+  on?: (type: string, listener: () => void) => void;
+};
+
+const DEFAULT_TILE_STYLE = "color('white', 1)";
+const geoJsonFormat = new GeoJSON();
+const MAX_CONCURRENT_LOADS = 3;
+const PRIMITIVE_BATCH_SIZE = 100;
 
 export default async function load3DLayers(
   scene: Scene,
   map: Map,
-  cesiumIontoken: string,
+  cesiumIontoken: string
 ): Promise<void> {
-  const layers: LayerOptions[] = map.getLayers().getArray();
+  const layers = map.getLayers().getArray() as unknown as ThreedTileLayer[];
 
-  for (const layer of layers) {
-    const type = layer.get('type');
-    const extrusion = layer.get('extrusion');
-    const style = layer.get('style') || {};
-    const show = layer.get('filter') ?? undefined;
-    const model = layer.get('model');
-    const dataType = layer.get('dataType')  ?? undefined;
+  const threedLayers = layers.filter((layer) => layer.get('type') === 'THREEDTILE');
+  await runWithConcurrency(
+    threedLayers.map(
+      (layer) => () => ensureLayerInitialized(scene, layer, cesiumIontoken)
+    ),
+    MAX_CONCURRENT_LOADS
+  );
+  threedLayers.forEach((layer) =>
+    layer.on?.('change:visible', () => {
+      void ensureLayerInitialized(scene, layer, cesiumIontoken);
+    })
+  );
+}
 
-    if (type === 'THREEDTILE' && dataType === 'extrusion') {
-      const url = `${layer.get('dataSource')}?service=WFS&version=1.0.0&request=GetFeature&typeName=${layer.get('name')}&outputFormat=application/json&srsName=EPSG:4326`;
-      try {
-        const geojson = await (await fetch(url)).json();
-        const features = new GeoJSON().readFeatures(geojson);
-        layer.CesiumExtrusions = [];
+async function ensureLayerInitialized(
+  scene: Scene,
+  layer: ThreedTileLayer,
+  cesiumIontoken: string
+) {
+  if (!layer.get('visible')) {
+    return;
+  }
 
-        for (const feature of features) {
-          const geometry = feature.getGeometry();
-          let coords: [number, number][] | undefined;
-          if (geometry && geometry.getType() === 'Polygon') {
-            coords = (geometry as any).getCoordinates()?.[0];
-          } else if (geometry && geometry.getType() === 'MultiPolygon') {
-            coords = (geometry as any).getCoordinates()?.[0]?.[0];
-          }
-          if (!coords) continue;
+  if (layer.CesiumExtrusions || layer.CesiumModels || layer.CesiumTileset) {
+    return;
+  }
 
-          const ground = parseFloat(feature.get(extrusion.groundAttr)) || 0;
-          const roof = parseFloat(feature.get(extrusion.roofAttr)) || ground + 5;
+  const dataType = layer.get('dataType');
+  if (dataType === 'extrusion') {
+    await loadExtrusionLayer(scene, layer);
+    return;
+  }
 
-          const positions = coords.map(([lon, lat]: [number, number]) => Cartesian3.fromDegrees(lon, lat, ground));
+  if (dataType === 'model') {
+    await loadModelLayer(scene, layer);
+    return;
+  }
 
-          let color: Color;
-          if (extrusion.color) {
-            const colorName = extrusion.color.toUpperCase();
-            color = (Color as any)[colorName] || Color.LIGHTGRAY;
-          } else {
-            color = Color.LIGHTGRAY;
-          }
-          color = color.withAlpha(extrusion.opacity ?? 1.0);
+  if (layer.get('model')) {
+    await loadTrees(layer, scene, layer.get('model'));
+    return;
+  }
 
-          const polygon = new PolygonGeometry({
-            polygonHierarchy: new PolygonHierarchy(positions),
-            height: ground,
-            extrudedHeight: roof
-          });
+  await loadTilesetLayer(scene, layer, cesiumIontoken);
+}
 
-          const geomInstance = new GeometryInstance({
-            geometry: polygon,
-            attributes: {
-              color: ColorGeometryInstanceAttribute.fromColor(color),
-            },
-            id: feature.getId()
-          });
+async function loadExtrusionLayer(scene: Scene, layer: ThreedTileLayer) {
+  const extrusion = layer.get('extrusion') as ExtrusionConfig | undefined;
+  const dataSource = layer.get('dataSource');
+  const layerName = layer.get('name');
+  if (!extrusion || !dataSource || !layerName) {
+    return;
+  }
 
-          const primitive = new Primitive({
-            geometryInstances: geomInstance,
-            appearance: new PerInstanceColorAppearance({
-              flat: true,
-              translucent: true,
-              closed: true,
-            }),
-            asynchronous: false,
-            releaseGeometryInstances: false,
-            show: layer.get('visible')
-          });
+  const requestUrl = `${dataSource}?service=WFS&version=1.0.0&request=GetFeature&typeName=${layerName}&outputFormat=application/json&srsName=EPSG:4326`;
 
-          layer.CesiumExtrusions.push(primitive);
-          scene.primitives.add(primitive);
-        }
-      } catch (err) {
-        console.error('Error loading WFS extruded buildings:', err);
-      }
+  try {
+    const response = await fetch(requestUrl);
+    const geojson = await response.json();
+    const features = geoJsonFormat.readFeatures(geojson);
+    const visible = Boolean(layer.get('visible'));
+    const baseColor = resolveColor(extrusion.color, extrusion.opacity);
 
-    } else if (type === 'THREEDTILE' && model) {
-      await loadTrees(layer, scene, model);
-    } else if (type === 'THREEDTILE' && dataType === 'model') {
-      const models = layer.get('models');
+    const primitives = features
+      .map((feature) => {
+        const coords = getPolygonCoordinates(feature.getGeometry());
+        if (!coords) return undefined;
 
-      for (const model of models) {
-        const url = layer.get('url') + model.fileName;
-        const lat = model.lat;
-        const lng = model.lng;
-        const height = model.height || 0;
-        const heightReference = !model.heightReference || model.heightReference === 'NONE' ? undefined : model.heightReference;
-        const pitch = model.rotPitch || 0;
-        const roll = model.rotRoll || 0;
-        const heading = model.rotHeading || 0;
-        let animation = model.animation || false;
+        const ground = toFiniteNumber(feature.get(extrusion.groundAttr)) ?? 0;
+        const roof = toFiniteNumber(feature.get(extrusion.roofAttr)) ?? ground + 5;
 
-        const position = Cartesian3.fromDegrees(lng, lat, height);
-        const hpr = new HeadingPitchRoll(heading, pitch, roll);
-        const modelMatrix = Transforms.headingPitchRollToFixedFrame(position, hpr, Ellipsoid.WGS84);
+        return createExtrusionPrimitive(
+          coords,
+          ground,
+          roof,
+          baseColor,
+          feature.getId(),
+          visible
+        );
+      })
+      .filter((primitive): primitive is Primitive => Boolean(primitive));
 
-        const modelPrimitive = await Model.fromGltfAsync({
-          url: url,
-          modelMatrix: modelMatrix,
-          minimumPixelSize: 0,
-          asynchronous: true,
-          heightReference: heightReference,
-        });
+    layer.CesiumExtrusions = primitives;
+    await insertPrimitivesInBatches(scene, primitives);
+  } catch (err) {
+    console.error('Error loading WFS extruded buildings:', err);
+  }
+}
 
-        modelPrimitive.show = layer.get('visible');
+async function loadModelLayer(scene: Scene, layer: ThreedTileLayer) {
+  const modelDefs = (layer.get('models') as ModelDefinition[]) ?? [];
+  if (!modelDefs.length) {
+    return;
+  }
 
-        layer.CesiumModels = layer.CesiumModels || [];
-        layer.CesiumModels.push(modelPrimitive);
-        scene.primitives.add(modelPrimitive);
-      }
+  const baseUrl = layer.get('url');
+  if (!baseUrl || typeof baseUrl !== 'string') {
+    return;
+  }
 
-    } else if (type === 'THREEDTILE') {
-      const url = layer.get('url');
-      let layerTileset: Cesium3DTileset | undefined;
+  const visible = Boolean(layer.get('visible'));
+  const primitives = await Promise.all(
+    modelDefs.map((definition) =>
+      Model.fromGltfAsync({
+        url: `${baseUrl}${definition.fileName}`,
+        modelMatrix: createModelMatrix(definition),
+        minimumPixelSize: 0,
+        asynchronous: true,
+        heightReference: resolveHeightReference(definition.heightReference)
+      })
+    )
+  );
 
-      try {
-        if (typeof url === 'number' && cesiumIontoken !== "") {
-          layerTileset = await Cesium3DTileset.fromIonAssetId(url, {
-            instanceFeatureIdLabel: layer.get('name'),
-            maximumScreenSpaceError: layer.get('maximumScreenSpaceError'),
-            dynamicScreenSpaceError: true,
-            show: layer.get('visible'),
-          });
+  primitives.forEach((primitive) => {
+    primitive.show = visible;
+  });
+  await insertPrimitivesInBatches(scene, primitives);
 
-        } else if (url === 'OSM-Buildings' && cesiumIontoken !== "") {
-          layerTileset = await createOsmBuildingsAsync({
-            showOutline: layer.get('showOutline')
-          });
-        } else if (typeof url === 'string') {
-          layerTileset = await Cesium3DTileset.fromUrl(url, {
-            maximumScreenSpaceError: layer.get('maximumScreenSpaceError'),
-            dynamicScreenSpaceError: true,
-            // preloadFlightDestinations: true,
-            show: layer.get('visible')
-          });
-          // layerTileset.debugShowBoundingVolume = true;
-          // layerTileset.debugShowContentBoundingVolume = true;
-          // layerTileset.debugShowViewerRequestVolume = true;
-          // layerTileset.debugWireframe = true;
-        }
+  layer.CesiumModels = [...(layer.CesiumModels ?? []), ...primitives];
+}
 
-        const tileset = scene.primitives.add(layerTileset!);
-        layer.CesiumTileset = tileset;
-        (layer.CesiumTileset as any).OrigoLayerName = layer.get('name');
+async function loadTilesetLayer(
+  scene: Scene,
+  layer: ThreedTileLayer,
+  cesiumIontoken: string
+) {
+  const url = layer.get('url');
+  if (!url) return;
 
-        if (style !== "default") {
-          layerTileset!.style = new Cesium3DTileStyle({ ...style, show });
-        } else {
-          layerTileset!.style = new Cesium3DTileStyle({ color: "color('white', 1)", show });
-        }
+  const visible = Boolean(layer.get('visible'));
+  const show = layer.get('filter') as boolean | undefined;
+  const style = layer.get('style') as (Record<string, unknown> | 'default' | undefined);
+  let tileset: Cesium3DTileset | undefined;
 
-      } catch (err) {
-        console.error('Error loading 3D Tileset:', err);
-      }
+  try {
+    if (typeof url === 'number' && cesiumIontoken) {
+      tileset = await Cesium3DTileset.fromIonAssetId(url, {
+        instanceFeatureIdLabel: layer.get('name'),
+        dynamicScreenSpaceError: true,
+        show: visible
+      });
+    } else if (url === 'OSM-Buildings' && cesiumIontoken) {
+      tileset = await createOsmBuildingsAsync({
+        showOutline: layer.get('showOutline') as boolean | undefined
+      });
+    } else if (typeof url === 'string') {
+      tileset = await Cesium3DTileset.fromUrl(url, {
+        dynamicScreenSpaceError: true,
+        shadows:
+          layer.get('showShadows') === false
+            ? ShadowMode.RECEIVE_ONLY
+            : ShadowMode.ENABLED,
+        show: visible
+      });
+    }
+
+    if (!tileset) {
+      return;
+    }
+
+    const added = scene.primitives.add(tileset);
+    layer.CesiumTileset = added;
+    (layer.CesiumTileset as any).OrigoLayerName = layer.get('name');
+
+    added.style = new Cesium3DTileStyle(
+      style && style !== 'default' ? { ...style, show } : { color: DEFAULT_TILE_STYLE, show }
+    );
+  } catch (err) {
+    console.error('Error loading 3D Tileset:', err);
+  }
+}
+
+function resolveColor(colorName?: string, opacity = 1): Color {
+  if (!colorName) {
+    return Color.LIGHTGRAY.withAlpha(opacity);
+  }
+
+  const upperCase = colorName.toUpperCase();
+  const namedColors = Color as unknown as Record<string, Color>;
+  return (namedColors[upperCase] || Color.LIGHTGRAY).withAlpha(opacity);
+}
+
+function getPolygonCoordinates(
+  geometry: unknown
+): [number, number][] | undefined {
+  if (!geometry || typeof (geometry as any).getType !== 'function') {
+    return undefined;
+  }
+
+  const type = (geometry as any).getType();
+  if (type === 'Polygon') {
+    return (geometry as any).getCoordinates()?.[0];
+  }
+  if (type === 'MultiPolygon') {
+    return (geometry as any).getCoordinates()?.[0]?.[0];
+  }
+  return undefined;
+}
+
+function createExtrusionPrimitive(
+  coords: [number, number][],
+  ground: number,
+  roof: number,
+  color: Color,
+  id: string | number | undefined,
+  visible: boolean
+): Primitive {
+  const positions = coords.map(([lon, lat]) =>
+    Cartesian3.fromDegrees(lon, lat, ground)
+  );
+
+  const polygon = new PolygonGeometry({
+    polygonHierarchy: new PolygonHierarchy(positions),
+    height: ground,
+    extrudedHeight: roof
+  });
+
+  const geomInstance = new GeometryInstance({
+    geometry: polygon,
+    attributes: {
+      color: ColorGeometryInstanceAttribute.fromColor(color)
+    },
+    id
+  });
+
+  return new Primitive({
+    geometryInstances: geomInstance,
+    appearance: new PerInstanceColorAppearance({
+      flat: true,
+      translucent: true,
+      closed: true
+    }),
+    asynchronous: false,
+    releaseGeometryInstances: false,
+    show: visible
+  });
+}
+
+function createModelMatrix(model: any) {
+  const position = Cartesian3.fromDegrees(
+    model.lng,
+    model.lat,
+    model.height || 0
+  );
+  const hpr = new HeadingPitchRoll(
+    model.rotHeading || 0,
+    model.rotPitch || 0,
+    model.rotRoll || 0
+  );
+  return Transforms.headingPitchRollToFixedFrame(position, hpr, Ellipsoid.WGS84);
+}
+
+function toFiniteNumber(value: unknown): number | undefined {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function resolveHeightReference(value?: string): HeightReference | undefined {
+  if (!value || value === 'NONE') {
+    return undefined;
+  }
+
+  const lookup = HeightReference as unknown as Record<string, HeightReference>;
+  return lookup[value] ?? undefined;
+}
+
+type CesiumPrimitiveLike = Primitive | Model;
+
+async function insertPrimitivesInBatches(
+  scene: Scene,
+  items: CesiumPrimitiveLike[]
+) {
+  for (let i = 0; i < items.length; i += PRIMITIVE_BATCH_SIZE) {
+    const batch = items.slice(i, i + PRIMITIVE_BATCH_SIZE);
+    batch.forEach((item) => scene.primitives.add(item));
+    if (i + PRIMITIVE_BATCH_SIZE < items.length) {
+      await waitNextFrame();
     }
   }
+}
+
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, limit: number) {
+  const results: T[] = [];
+  let idx = 0;
+
+  async function worker() {
+    while (idx < tasks.length) {
+      const current = idx++;
+      results[current] = await tasks[current]();
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () =>
+    worker()
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+function waitNextFrame() {
+  return new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => resolve());
+      return;
+    }
+    setTimeout(() => resolve(), 16);
+  });
 }

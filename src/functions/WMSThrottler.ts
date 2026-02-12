@@ -2,13 +2,19 @@ type WMSKey = string;
 
 type WMSParams = Record<string, string>;
 
+type Waiter = { resolve: (img: ImageBitmap) => void; reject: (err: any) => void };
+
 type WMSRequest = {
   url: string;
   params?: WMSParams;
   resolve: (img: ImageBitmap) => void;
   reject: (err: any) => void;
-  priority: number;     // lower = higher priority
+  priority: number;
   key: WMSKey;
+  waiters: Waiter[];
+  computedUrl: string;
+  createdAt: number;
+  heapIndex: number;
 };
 
 type InflightEntry = {
@@ -19,6 +25,7 @@ type InflightEntry = {
 export default class WMSThrottler {
   private queue: WMSRequest[] = [];
   private inflight = new Map<WMSKey, InflightEntry>();
+  private queuedRequests = new Map<WMSKey, WMSRequest>();
   private activeCount = 0;
   private maxConcurrentIdle: number;
   private maxConcurrentMoving: number;
@@ -58,29 +65,44 @@ export default class WMSThrottler {
     }
 
     // If already queued, bump priority (coalesce)
-    const existing = this.queue.find(q => q.key === key);
+    const existing = this.queuedRequests.get(key);
     if (existing) {
-        existing.priority = Math.min(existing.priority, priority);
-        return new Promise((resolve, reject) => {
-            const arr = this.queuedWaiters.get(key) ?? [];
-            arr.push({ resolve, reject });
-            this.queuedWaiters.set(key, arr);
-        });
+      const previousPriority = existing.priority;
+      existing.priority = Math.min(existing.priority, priority);
+      return new Promise((resolve, reject) => {
+        existing.waiters.push({ resolve, reject });
+        if (existing.heapIndex >= 0 && existing.priority !== previousPriority) {
+          this.reheapify(existing.heapIndex);
+        }
+      });
     }
 
     return new Promise((resolve, reject) => {
-      const req: WMSRequest = { url, params, resolve, reject, priority, key };
-      this.queue.push(req);
+      const req: WMSRequest = {
+        url,
+        params,
+        resolve,
+        reject,
+        priority,
+        key,
+        waiters: [],
+        computedUrl: this.buildFullUrl(url, params),
+        createdAt: Date.now(),
+        heapIndex: -1
+      };
+      this.pushRequest(req);
       this.processQueue();
     });
   }
 
   pause() {
+    if (this.paused) return;
     this.paused = true;
     clearTimeout(this._resumeTimer);
   }
 
   resume() {
+    if (!this.paused) return;
     this.paused = false;
     this.processQueue();
   }
@@ -90,54 +112,43 @@ export default class WMSThrottler {
     this._resumeTimer = setTimeout(() => this.resume(), ms);
   }
 
-    cancelAll() {
-        for (const [key, entry] of this.inflight) {
-            entry.controller.abort();
-            entry.promises.forEach(p => p.reject(new Error("Cancelled")));
-        }
-        this.inflight.clear();
-
-        // Reject queued (not yet started)
-        this.queue.forEach(req => req.reject(new Error("Cancelled")));
-        this.queue = [];
-
-        // Reject queued waiters attached to queued keys
-        for (const [key, waiters] of this.queuedWaiters) {
-            waiters.forEach(w => w.reject(new Error("Cancelled")));
-        }
-        this.queuedWaiters.clear();
-
-        this.activeCount = 0;
+  cancelAll() {
+    const error = new Error("Cancelled");
+    for (const [, entry] of this.inflight) {
+      entry.controller.abort();
+      entry.promises.forEach((p) => p.reject(error));
     }
+    this.inflight.clear();
+
+    this.queue.forEach((req) => {
+      req.reject(error);
+      req.waiters.forEach((w) => w.reject(error));
+      req.heapIndex = -1;
+    });
+    this.queue = [];
+    this.queuedRequests.clear();
+
+    this.activeCount = 0;
+  }
 
   private currentLimit(): number {
     return this.cameraMoving ? this.maxConcurrentMoving : this.maxConcurrentIdle;
   }
 
-  private queuedWaiters = new Map<WMSKey, Array<{ resolve: (b: ImageBitmap) => void; reject: (e: any) => void }>>();
-
   private processQueue() {
     if (this.paused) return;
 
-    // Sort by priority; use LIFO while moving to favor latest tiles
-    this.queue.sort((a, b) => a.priority - b.priority);
-    if (this.cameraMoving) {
-      // reverse so newest with same priority pop first
-      this.queue.reverse();
-    }
+    while (this.activeCount < this.currentLimit()) {
+      const req = this.popRequest();
+      if (!req) break;
+      if (this.inflight.has(req.key)) {
+        continue;
+      }
 
-    while (this.activeCount < this.currentLimit() && this.queue.length > 0) {
-        const req = this.queue.pop()!;
-        if (this.inflight.has(req.key)) continue;
+      const controller = new AbortController();
+      const promises: Waiter[] = [{ resolve: req.resolve, reject: req.reject }, ...req.waiters];
 
-        const controller = new AbortController();
-        const waiters = this.queuedWaiters.get(req.key);
-        this.queuedWaiters.delete(req.key);
-
-        const promises = [{ resolve: req.resolve, reject: req.reject }];
-        if (waiters?.length) promises.push(...waiters);
-
-      this.inflight.set(req.key, { controller, promises: [{ resolve: req.resolve, reject: req.reject }] });
+      this.inflight.set(req.key, { controller, promises });
       this.activeCount++;
       this.fetchWMS(req, controller.signal)
         .then((bitmap) => {
@@ -145,11 +156,6 @@ export default class WMSThrottler {
             if (entry) {
                 entry.promises.forEach(p => p.resolve(bitmap));
                 this.inflight.delete(req.key);
-                const waiters = this.queuedWaiters.get(req.key);
-                if (waiters) {
-                    waiters.forEach(w => w.resolve(bitmap));
-                    this.queuedWaiters.delete(req.key);
-                }
             }
         })
         .catch((err) => {
@@ -157,11 +163,6 @@ export default class WMSThrottler {
             if (entry) {
                 entry.promises.forEach(p => p.reject(err));
                 this.inflight.delete(req.key);
-            }
-            const waiters = this.queuedWaiters.get(req.key);
-            if (waiters) {
-                waiters.forEach(w => w.reject(err));
-                this.queuedWaiters.delete(req.key);
             }
         })
         .finally(() => {
@@ -172,20 +173,13 @@ export default class WMSThrottler {
   }
 
   private async fetchWMS(req: WMSRequest, signal: AbortSignal): Promise<ImageBitmap> {
-    // Build URL
-    let url = req.url;
-    if (req.params) {
-      const params = new URLSearchParams(req.params);
-      url += (url.includes("?") ? "&" : "?") + params.toString();
-    }
-
     const maxRetries = 2;
     let attempt = 0;
     const backoffBase = 150;
 
     while (true) {
       try {
-        const res = await fetch(url, {
+        const res = await fetch(req.computedUrl, {
           mode: "cors",
           signal,
           headers: { Accept: "image/png,image/jpeg;q=0.9,*/*;q=0.1" }
@@ -205,5 +199,89 @@ export default class WMSThrottler {
         continue;
       }
     }
+  }
+
+  private buildFullUrl(url: string, params?: WMSParams): string {
+    if (!params) {
+      return url;
+    }
+    const paramString = new URLSearchParams(params).toString();
+    return url + (url.includes("?") ? "&" : "?") + paramString;
+  }
+
+  private compare(a: WMSRequest, b: WMSRequest): number {
+    if (a.priority !== b.priority) {
+      return a.priority - b.priority;
+    }
+    return b.createdAt - a.createdAt;
+  }
+
+  private pushRequest(req: WMSRequest) {
+    req.heapIndex = this.queue.length;
+    this.queue.push(req);
+    this.queuedRequests.set(req.key, req);
+    this.bubbleUp(req.heapIndex);
+  }
+
+  private popRequest(): WMSRequest | undefined {
+    if (this.queue.length === 0) {
+      return undefined;
+    }
+
+    const top = this.queue[0];
+    const last = this.queue.pop()!;
+    if (this.queue.length > 0) {
+      this.queue[0] = last;
+      last.heapIndex = 0;
+      this.bubbleDown(0);
+    }
+    this.queuedRequests.delete(top.key);
+    top.heapIndex = -1;
+    return top;
+  }
+
+  private bubbleUp(index: number) {
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      if (this.compare(this.queue[index], this.queue[parent]) >= 0) {
+        break;
+      }
+      this.swap(index, parent);
+      index = parent;
+    }
+  }
+
+  private bubbleDown(index: number) {
+    const length = this.queue.length;
+    while (true) {
+      let left = (index << 1) + 1;
+      let right = left + 1;
+      let smallest = index;
+
+      if (left < length && this.compare(this.queue[left], this.queue[smallest]) < 0) {
+        smallest = left;
+      }
+      if (right < length && this.compare(this.queue[right], this.queue[smallest]) < 0) {
+        smallest = right;
+      }
+      if (smallest === index) {
+        break;
+      }
+      this.swap(index, smallest);
+      index = smallest;
+    }
+  }
+
+  private reheapify(index: number) {
+    this.bubbleUp(index);
+    this.bubbleDown(index);
+  }
+
+  private swap(i: number, j: number) {
+    const tmp = this.queue[i];
+    this.queue[i] = this.queue[j];
+    this.queue[j] = tmp;
+    this.queue[i].heapIndex = i;
+    this.queue[j].heapIndex = j;
   }
 }

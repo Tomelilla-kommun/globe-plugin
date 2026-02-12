@@ -1012,4 +1012,15 @@ span.flatpickr-day.nextMonthDay.selected {
   top: 269px !important;
 }
 
+#controlUI, #streetView, .flatpickrEl {
+  pointer-events: auto;
+}
+
+#cesium-overlay-wrapper {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+
 /*# sourceMappingURL=globe.css.map */

@@ -13,7 +13,7 @@ const orientation = new Cesium.HeadingPitchRoll(
   0.0
 );
 
-export default function useGlobeFeatureInfo(
+export default function getFeatureInfo(
   scene: Cesium.Scene,
   viewer: any, // Origo viewer (unknown TS types)
   map: any, // Origo map
