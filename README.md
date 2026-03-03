@@ -25,6 +25,19 @@ import OLCesium from 'olcs/OLCesium';
 window.OLCesium = OLCesium;
 ```
 
+and add this at thebottom of the file:
+
+```
+Origo.layerType = layerType;
+```
+
+before this:
+
+```
+export default Origo;
+```
+
+
 ## Layer configuration
 
 To add 3D layers to the viewer, please see `index_example.json`.
