@@ -1,23 +1,10 @@
+import * as Cesium from 'cesium';
+import flatpickr from 'flatpickr';
 import OLCesium from 'olcs/OLCesium';
 import Origo, { OrigoButton, OrigoElement } from 'Origo';
-import flatpickr from 'flatpickr';
-import * as Cesium from 'cesium';
-import {
-  Ion,
-  IonResource,
-  createWorldTerrainAsync,
-  CesiumTerrainProvider,
-  ScreenSpaceEventHandler,
-  PostProcessStageLibrary,
-  ScreenSpaceEventType,
-  Color,
-  SkyBox,
-  JulianDate,
-  Clock,
-} from 'cesium';
+
 import measureTool from './functions/measureTool';
 import addGLTF from './layer/gltf';
-import add3DTile from './layer/threedtile';
 import { threedtile } from './layer/layerhelper';
 import getFeatureInfo from './functions/featureinfo';
 import ViewShed from './functions/ViewShed';
@@ -27,8 +14,13 @@ import dynamicResolutionScaling from './functions/dynamicResolutionScaling';
 import patchCollections from './functions/patchCollections';
 import quickTimePicker from './functions/quickTimePicker';
 import { setCameraHeight, getCameraHeight, setIsStreetMode, getIsStreetMode, isGlobeActive } from './globeState';
+import { streetViewHtml, cameraControlsHtml } from './uiTemplates';
+import { createElementFromMarkup, stopDomEvent } from './globe/domUtils';
+import { configureGlobeAppearance, configureScene, loadGltfAssets, loadTerrainProvider, load3DTiles } from './globe/sceneConfig';
+import { createPolygonUi } from './globe/polygonUi';
 
-type CleanupFn = () => void;
+import type { PolygonUiApi } from './globe/polygonUi';
+import type { CleanupFn, GLTFAsset, GlobeSettings } from './globe/types';
 
 class CleanupStack {
   private stack: CleanupFn[] = [];
@@ -64,38 +56,6 @@ declare global {
   }
 }
 
-interface GLTFAsset {
-  url: string;
-  lat: number;
-  lng: number;
-  height: number;
-  heightReference?: any;
-  animation?: any;
-}
-
-interface SkyBoxSettings {
-  url: string;
-  images: { pX: string; nX: string; pY: string; nY: string; pZ: string; nZ: string };
-}
-
-interface ShadowSettings {
-  darkness: number;
-  fadingEnabled: boolean;
-  maximumDistance: number;
-  normalOffset: number;
-  size: number;
-  softShadows: boolean;
-}
-
-interface GlobeSettings {
-  enableAtmosphere?: boolean;
-  enableFog?: boolean;
-  shadows?: ShadowSettings;
-  depthTestAgainstTerrain?: boolean;
-  showGroundAtmosphere?: boolean;
-  skyBox?: SkyBoxSettings | false;
-}
-
 interface GlobeOptions {
   target?: string;
   globeOnStart?: boolean;
@@ -106,6 +66,7 @@ interface GlobeOptions {
   measure?: boolean;
   flyTo?: boolean;
   quickTimeShadowPicker?: boolean;
+  drawTool?: boolean;
   fx?: boolean;
   resolutionScale?: number;
   settings?: GlobeSettings;
@@ -124,6 +85,7 @@ const DEFAULT_OPTIONS: Required<Pick<GlobeOptions,
   'measure' |
   'flyTo' |
   'quickTimeShadowPicker' |
+  'drawTool' |
   'fx'
 >> & { deactivateControls: string[] } = {
   showGlobe: true,
@@ -133,100 +95,9 @@ const DEFAULT_OPTIONS: Required<Pick<GlobeOptions,
   measure: false,
   flyTo: false,
   quickTimeShadowPicker: false,
+  drawTool: false,
   fx: false,
   deactivateControls: [],
-};
-
-const configureScene = (scene: Cesium.Scene, settings: GlobeSettings): void => {
-  // @ts-ignore: Ignore error if scene.clock is not writable
-  scene.clock = new Clock();
-  if (scene.skyAtmosphere) {
-    scene.skyAtmosphere.show = settings.enableAtmosphere ?? false;
-  }
-  scene.fog.enabled = !!settings.enableFog;
-
-  const shadowSettings = settings.shadows;
-  const shadowMap = scene.shadowMap;
-  if (shadowSettings && shadowMap) {
-    shadowMap.darkness = shadowSettings.darkness;
-    shadowMap.fadingEnabled = shadowSettings.fadingEnabled;
-    shadowMap.maximumDistance = shadowSettings.maximumDistance;
-    shadowMap.normalOffset = Boolean(shadowSettings.normalOffset);
-    shadowMap.size = shadowSettings.size;
-    shadowMap.softShadows = shadowSettings.softShadows;
-  }
-
-  const ambientOcclusion = scene.postProcessStages.ambientOcclusion;
-  if (ambientOcclusion) {
-    ambientOcclusion.enabled = false;
-    const viewModel = {
-      ambientOcclusionOnly: false,
-      intensity: 0.3,
-      bias: 0.2,
-      lengthCap: 30,
-      stepSize: 20.0,
-      blurStepSize: 4,
-    };
-    ambientOcclusion.uniforms.ambientOcclusionOnly = Boolean(viewModel.ambientOcclusionOnly);
-    ambientOcclusion.uniforms.intensity = Number(viewModel.intensity);
-    ambientOcclusion.uniforms.bias = Number(viewModel.bias);
-    ambientOcclusion.uniforms.lengthCap = viewModel.lengthCap;
-    ambientOcclusion.uniforms.stepSize = Number(viewModel.stepSize);
-    ambientOcclusion.uniforms.blurStepSize = Number(viewModel.blurStepSize);
-  }
-};
-
-const configureGlobeAppearance = (scene: Cesium.Scene, settings: GlobeSettings): void => {
-  const globe = scene.globe;
-  globe.depthTestAgainstTerrain = !!settings.depthTestAgainstTerrain;
-  globe.showGroundAtmosphere = !!settings.showGroundAtmosphere;
-  if (settings.skyBox) {
-    const url = settings.skyBox.url;
-    scene.skyBox = new SkyBox({
-      sources: {
-        positiveX: `${url}${settings.skyBox.images.pX}`,
-        negativeX: `${url}${settings.skyBox.images.nX}`,
-        positiveY: `${url}${settings.skyBox.images.pY}`,
-        negativeY: `${url}${settings.skyBox.images.nY}`,
-        positiveZ: `${url}${settings.skyBox.images.pZ}`,
-        negativeZ: `${url}${settings.skyBox.images.nZ}`
-      }
-    });
-  }
-};
-
-const loadTerrainProvider = async (
-  scene: Cesium.Scene,
-  options: { cesiumTerrainProvider?: string; cesiumIonassetIdTerrain?: number; cesiumIontoken?: string }
-): Promise<void> => {
-  const { cesiumTerrainProvider, cesiumIonassetIdTerrain, cesiumIontoken } = options;
-  if (cesiumTerrainProvider) {
-    scene.terrainProvider = await CesiumTerrainProvider.fromUrl(cesiumTerrainProvider, { requestVertexNormals: false });
-    return;
-  }
-  if (cesiumIonassetIdTerrain && cesiumIontoken) {
-    scene.terrainProvider = await CesiumTerrainProvider.fromUrl(
-      IonResource.fromAssetId(cesiumIonassetIdTerrain),
-      { requestVertexNormals: true }
-    );
-    return;
-  }
-  if (cesiumIontoken) {
-    scene.terrainProvider = await createWorldTerrainAsync({ requestVertexNormals: true });
-  }
-};
-
-const load3DTiles = (scene: Cesium.Scene, map: any, ionToken?: string): void => {
-  add3DTile(scene, map, ionToken ?? '');
-};
-
-const loadGltfAssets = (
-  scene: Cesium.Scene,
-  gltfAssets?: GLTFAsset[]
-): void => {
-  gltfAssets?.forEach(({ url, lat, lng, height, heightReference, animation }) => {
-    addGLTF(scene, url, lat, lng, height, heightReference, animation);
-  });
 };
 
 setCameraHeight(1.6);
@@ -259,6 +130,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     measure,
     flyTo,
     quickTimeShadowPicker,
+    drawTool,
     fx,
   } = resolvedOptions;
 
@@ -276,6 +148,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
   let viewshedButton: OrigoButton | null = null;
   let toggleShadowsButton: OrigoButton;
   let quickTimePickerButton: OrigoButton | null = null;
+  let drawToolButton: OrigoButton | null = null;
   let toggleFXButton: OrigoButton | null = null;
 
   let cesiumHandler: Cesium.ScreenSpaceEventHandler | undefined;
@@ -293,13 +166,24 @@ const Globe = function Globe(options: GlobeOptions = {}) {
   const ownedDomNodes: HTMLElement[] = []; // track nodes mounted outside component root for cleanup
   const trackNode = (node: HTMLElement) => { ownedDomNodes.push(node); return node; };
   const cleanupDom = () => { ownedDomNodes.splice(0).forEach(n => n.remove()); };
+
   const injectAtBodyStart = (markup: string): HTMLElement | undefined => {
     if (typeof document === 'undefined' || !document.body) return undefined;
-    const template = document.createElement('div');
-    template.innerHTML = markup.trim();
-    const node = template.firstElementChild as HTMLElement | null;
+    const node = createElementFromMarkup(markup);
     if (!node) return undefined;
     document.body.insertBefore(node, document.body.firstChild);
+    trackNode(node);
+    return node;
+  };
+  const injectIntoMap = (markup: string): HTMLElement | undefined => {
+    if (typeof document === 'undefined' || !document.body) return undefined;
+    const node = createElementFromMarkup(markup);
+    if (!node) return undefined;
+
+    const parent = (target ? document.getElementById(target) : null)
+      ?? (document.querySelector('.o-map') as HTMLElement | null)
+      ?? document.body;
+    parent.appendChild(node);
     trackNode(node);
     return node;
   };
@@ -311,14 +195,12 @@ const Globe = function Globe(options: GlobeOptions = {}) {
   const buttons: OrigoButton[] = [];
 
   if (cesiumIontoken) {
-    Ion.defaultAccessToken = cesiumIontoken;
+    Cesium.Ion.defaultAccessToken = cesiumIontoken;
   }
 
-  const requestSceneRender = () => {
-    if (scene) {
-      scene.requestRender();
-    }
-  };
+  const requestSceneRender = () => scene?.requestRender();
+
+  let polygonUi: PolygonUiApi | null = null;
 
   const toggleGlobe = (): void => {
     if (!viewer || !oGlobe || !scene) {
@@ -363,6 +245,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     const toggleShadowsButtonEl = document.getElementById(toggleShadowsButton.getId());
     const quickTimePickerButtonEl = quickTimePickerButton ? document.getElementById(quickTimePickerButton.getId()) : null;
     const toggleFXButtonEl = toggleFXButton ? document.getElementById(toggleFXButton.getId()) : null;
+    const drawToolButtonEl = drawToolButton ? document.getElementById(drawToolButton.getId()) : null;
 
     const isActive = globeButtonEl?.classList.contains('active') ?? false;
     flatpickrButtonEl?.classList.toggle('hidden', !isActive);
@@ -370,6 +253,12 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     toggleShadowsButtonEl?.classList.toggle('hidden', !isActive);
     quickTimePickerButtonEl?.classList.toggle('hidden', !isActive);
     toggleFXButtonEl?.classList.toggle('hidden', !isActive);
+    drawToolButtonEl?.classList.toggle('hidden', !isActive);
+
+    if (!isActive) {
+      drawToolButtonEl?.classList.remove('active');
+      polygonUi?.setPolygonToolbarVisible(false);
+    }
   };
 
   let hasActivatedOnStart = false;
@@ -473,74 +362,99 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       requestSceneRender();
     },
     addSvgIcons: () => {
-      if (document.getElementById('globe-svg-sprite')) return;
-      const svgIcons = `
-      <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
-        <symbol viewBox="0 0 24 24" id="ic_cube_24px">
-          <path d="M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L6.04,7.5L12,10.85L17.96,7.5L12,4.15Z" />
-        </symbol>
-        <symbol viewBox="0 0 24 24" id="ic_clock-time-four_24px">
-          <path d="M12 2C6.5 2 2 6.5 2 12C2 17.5 6.5 22 12 22C17.5 22 22 17.5 22 12S17.5 2 12 2M16.3 15.2L11 12.3V7H12.5V11.4L17 13.9L16.3 15.2Z" />
-        </symbol>
-          <svg viewBox="0 0 24 24" id="ic_box-shadow_24px"><path d="M3,3H18V18H3V3M19,19H21V21H19V19M19,16H21V18H19V16M19,13H21V15H19V13M19,10H21V12H19V10M19,7H21V9H19V7M16,19H18V21H16V19M13,19H15V21H13V19M10,19H12V21H10V19M7,19H9V21H7V19Z" />
-        </symbol>
-      </svg>
-      `;
-      const spriteWrapper = document.createElement('div');
-      spriteWrapper.id = 'globe-svg-sprite';
-      spriteWrapper.innerHTML = svgIcons;
-      document.body.insertBefore(spriteWrapper, document.body.firstChild ?? null);
-      trackNode(spriteWrapper);
+      if (typeof document === 'undefined' || !document.body) return;
+
+      const svgNs = 'http://www.w3.org/2000/svg';
+      let spriteWrapper = document.getElementById('globe-svg-sprite') as HTMLElement | null;
+
+      if (!spriteWrapper) {
+        spriteWrapper = document.createElement('div');
+        spriteWrapper.id = 'globe-svg-sprite';
+        spriteWrapper.style.display = 'none';
+
+        const svg = document.createElementNS(svgNs, 'svg');
+        svg.setAttribute('xmlns', svgNs);
+        spriteWrapper.appendChild(svg);
+
+        document.body.insertBefore(spriteWrapper, document.body.firstChild ?? null);
+        trackNode(spriteWrapper);
+      }
+
+      let spriteSvg = spriteWrapper.querySelector('svg') as SVGSVGElement | null;
+      if (!spriteSvg) {
+        spriteSvg = document.createElementNS(svgNs, 'svg');
+        spriteSvg.setAttribute('xmlns', svgNs);
+        spriteWrapper.appendChild(spriteSvg);
+      }
+
+      const ensureSymbol = (id: string, viewBox: string, innerSvg: string) => {
+        if (document.getElementById(id)) return;
+        const symbol = document.createElementNS(svgNs, 'symbol');
+        symbol.setAttribute('id', id);
+        symbol.setAttribute('viewBox', viewBox);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (symbol as any).innerHTML = innerSvg;
+        spriteSvg!.appendChild(symbol);
+      };
+
+      // Existing globe icons
+      ensureSymbol(
+        'ic_cube_24px',
+        '0 0 24 24',
+        '<path d="M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L6.04,7.5L12,10.85L17.96,7.5L12,4.15Z" />'
+      );
+      ensureSymbol(
+        'ic_clock-time-four_24px',
+        '0 0 24 24',
+        '<path d="M12 2C6.5 2 2 6.5 2 12C2 17.5 6.5 22 12 22C17.5 22 22 17.5 22 12S17.5 2 12 2M16.3 15.2L11 12.3V7H12.5V11.4L17 13.9L16.3 15.2Z" />'
+      );
+      ensureSymbol(
+        'ic_box-shadow_24px',
+        '0 0 24 24',
+        '<path d="M3,3H18V18H3V3M19,19H21V21H19V19M19,16H21V18H19V16M19,13H21V15H19V13M19,10H21V12H19V10M19,7H21V9H19V7M16,19H18V21H16V19M13,19H15V21H13V19M10,19H12V21H10V19M7,19H9V21H7V19Z" />'
+      );
+      ensureSymbol(
+        'ic_chevron_right_24px',
+        '0 0 24 24',
+        '<path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />'
+      );
+
+      // Origo-style toolbar icons (fallbacks). If Origo already provides these IDs,
+      // we don't override them.
+      ensureSymbol(
+        'o_polygon_24px',
+        '0 0 24 24',
+        '<path d="M3 17.25V21h3.75l11.06-11.06-3.75-3.75L3 17.25zm2.92 2.08H5v-1.92l9.06-9.06 1.92 1.92-9.06 9.06zm13.06-12.19c.39-.39.39-1.02 0-1.41l-2.34-2.34a.995.995 0 0 0-1.41 0l-1.13 1.13 3.75 3.75 1.13-1.13z" />'
+      );
+      ensureSymbol(
+        'ic_height_24px',
+        '0 0 24 24',
+        '<path d="M7 2h10v2H7V2zm0 18h10v2H7v-2zM11 6h2v12h-2V6zm-3 3l-3 3 3 3V9zm8 0v6l3-3-3-3z" />'
+      );
+      ensureSymbol(
+        'ic_delete_24px',
+        '0 0 24 24',
+        '<path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />'
+      );
+      ensureSymbol(
+        'ic_share_24px',
+        '0 0 24 24',
+        '<path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.03-.47-.09-.7l7.02-4.11c.53.5 1.23.81 2.01.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.07 8.81C7.53 8.31 6.83 8 6.05 8c-1.66 0-3 1.34-3 3s1.34 3 3 3c.78 0 1.48-.31 2.01-.81l7.12 4.17c-.05.21-.08.43-.08.64 0 1.52 1.23 2.75 2.75 2.75s2.75-1.23 2.75-2.75-1.23-2.75-2.75-2.75z" />'
+      );
+      ensureSymbol(
+        'ic_title_24px',
+        '0 0 24 24',
+        '<path d="M3 5v14h18V5H3zm16 12H5V7h14v10z" /><path d="M7 9h10v2H7V9zm0 4h6v2H7v-2z" />'
+      );
+      ensureSymbol(
+        'ic_download_24px',
+        '0 0 24 24',
+        '<path d="M5 20h14v-2H5v2zm7-18c-.55 0-1 .45-1 1v10.59l-3.29-3.29c-.63-.63-1.71-.18-1.71.71 0 .39.16.77.44 1.06l5 5c.39.39 1.02.39 1.41 0l5-5c.28-.29.44-.67.44-1.06 0-.89-1.08-1.34-1.71-.71L13 13.59V3c0-.55-.45-1-1-1z" />'
+      );
     },
     addStreetView:(streetViewEnabled: boolean, handler: Cesium.ScreenSpaceEventHandler, globe: any): CleanupFn | void => {
       if (streetViewEnabled) {
-        const streetViewHtml = `
-        <div id="streetView" style="
-          position: absolute;
-          bottom: 102px;
-          left: 10px;
-          z-index: 100;
-          cursor: pointer;
-          background: rgba(255, 255, 255, 0.7);
-          border-radius: 4px;
-          padding: 3px;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-        ">
-
-          <div id="" style="
-            border: 1px solid #424242;
-            border-radius: 4px;
-            display: flex;
-          ">
-            <div id="street-mode-toggle" style=" padding-top: 2px;">
-              <svg width="26" height="26" viewBox="0 0 24 24" fill="gray" xmlns="http://www.w3.org/2000/svg">
-                <path d="M15 4.5C15 5.88071 13.8807 7 12.5 7C11.1193 7 10 5.88071 10 4.5C10 3.11929 11.1193 2 12.5 2C13.8807 2 15 3.11929 15 4.5Z" fill="hsl(0, 0%, 29%)"/>
-                <path fill-rule="evenodd" clip-rule="evenodd" d="M10.9292 9.2672C11.129 9.25637 11.3217 9.25 11.5 9.25C12.0541 9.25 12.6539 9.31158 13.1938 9.38913C14.7154 9.60766 15.8674 10.7305 16.3278 12.1117C16.4321 12.4245 16.7484 12.6149 17.0737 12.5607L18.8767 12.2602C19.2853 12.1921 19.6717 12.4681 19.7398 12.8767C19.8079 13.2853 19.5319 13.6717 19.1233 13.7398L17.3203 14.0403C16.2669 14.2159 15.2425 13.599 14.9048 12.586C14.5975 11.6642 13.862 11.0005 12.9806 10.8739C12.7129 10.8354 12.4404 10.8029 12.1757 10.7809L11.9045 13.4923C11.8206 14.332 11.8108 14.5537 11.8675 14.7518C11.9241 14.9498 12.0497 15.1328 12.5652 15.8009L16.9942 21.5419C17.2473 21.8698 17.1865 22.3408 16.8585 22.5938C16.5306 22.8468 16.0596 22.7861 15.8066 22.4581L11.3775 16.7172C11.3536 16.6862 11.33 16.6556 11.3066 16.6254C10.896 16.0941 10.5711 15.6738 10.4253 15.1645C10.2796 14.6551 10.3329 14.1265 10.4004 13.4585C10.4042 13.4205 10.4081 13.382 10.412 13.3431L10.6661 10.8023C8.99274 11.076 7.75003 12.6491 7.75003 14.5C7.75003 14.9142 7.41424 15.25 7.00003 15.25C6.58581 15.25 6.25003 14.9142 6.25003 14.5C6.25003 11.8593 8.16383 9.41707 10.9292 9.2672ZM10.1471 16.7646C10.5533 16.8458 10.8167 17.2409 10.7355 17.6471C10.3779 19.4349 9.4014 21.0394 7.97772 22.1783L7.46855 22.5857C7.1451 22.8444 6.67313 22.792 6.41438 22.4685C6.15562 22.1451 6.20806 21.6731 6.53151 21.4143L7.04067 21.007C8.18877 20.0885 8.97625 18.7946 9.26459 17.3529C9.34583 16.9467 9.74094 16.6833 10.1471 16.7646Z" fill="hsl(0, 0%, 29%)"/>
-              </svg>
-            </div>
-            <div id="height-controls" style="
-              display: none;
-              flex-direction: row;
-              align-items: center;
-              justify-content: center;
-              border-left: 1px solid;
-              padding: 2px;
-              font-family: sans-serif;
-              font-size: 14px;
-              color: hsl(0, 0%, 29%);
-            ">
-              <div style="padding-left: 3px; padding-right: 3px;">
-                <div id="height-up" style="margin-bottom: -3px; color: hsl(0, 0%, 29%);">▲</div>
-                <div id="height-down" style="margin-top: -3px; color: hsl(0, 0%, 29%);">▼</div>
-              </div>
-              <div id="height-display">${getCameraHeight().toFixed(2)} m</div>
-            </div>
-          </div>
-        </div>
-        `;
-        const node = injectAtBodyStart(streetViewHtml);
+        const node = injectAtBodyStart(streetViewHtml(`${getCameraHeight().toFixed(2)} m`));
         void StreetView(scene, handler, globe);
         return () => node?.remove();
       }
@@ -553,74 +467,24 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     },
     addControls: () => {
       if (cameraControls) {
-        const cameraControlHtml = `
-          <div id="controlUI" style="
-            position: absolute;
-            bottom: 35px;
-            left: 10px;
-            z-index: 99;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            font-size: 1rem;
-            font-weight: 400;
-            line-height: 1.5;
-            -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
-            box-sizing: border-box;
-            background: rgba(255, 255, 255, 0.7);
-            border-radius: 4px;
-            display: inline-block;
-            padding: 3px;
-          ">
-            <div id="camera-controls" style="
-              display: flex;
-              flex-direction: column;
-              align-items: center;
-              border: 1px solid #424242;
-              border-radius: 4px;
-              color: #424242;
-            ">
-              <button id="cam-up" style="margin-bottom: -17px; margin-top: -6px; background: none; border: none; cursor: pointer; padding: 4px;">
-                <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(-90deg);">
-                  <use xlink:href="#ic_chevron_right_24px"></use>
-                </svg>
-              </button>
-              <div style="display: flex; gap: 4px;">
-                <button id="cam-left" style="margin-left: -7px; background: none; border: none; cursor: pointer; padding: 4px;">
-                  <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(180deg);">
-                    <use xlink:href="#ic_chevron_right_24px"></use>
-                  </svg>
-                </button>
-                <button id="cam-right" style="margin-right: -6px; margin-left: -3px; background: none; border: none; cursor: pointer; padding: 4px;">
-                  <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)">
-                    <use xlink:href="#ic_chevron_right_24px"></use>
-                  </svg>
-                </button>
-              </div>
-              <button id="cam-down" style="margin-top: -19px; margin-bottom: -6px; background: none; border: none; cursor: pointer; padding: 4px;">
-                <svg width="22" height="22" viewBox="0 0 22 22" fill="hsl(0, 0%, 29%)" style="transform: rotate(90deg);">
-                  <use xlink:href="#ic_chevron_right_24px"></use>
-                </svg>
-              </button>
-            </div>
-          </div>
-        `;
-        const node = injectAtBodyStart(cameraControlHtml);
+        const node = injectAtBodyStart(cameraControlsHtml());
         return () => node?.remove();
       }
       return undefined;
     },
     pickedFeatureStyle: (handler: Cesium.ScreenSpaceEventHandler): CleanupFn | void => {
-      if (!PostProcessStageLibrary.isSilhouetteSupported(scene)) return;
+      if (!Cesium.PostProcessStageLibrary.isSilhouetteSupported(scene)) return;
 
-      const silhouette = PostProcessStageLibrary.createEdgeDetectionStage();
-      silhouette.uniforms.color = Color.ROYALBLUE;
+      const silhouette = Cesium.PostProcessStageLibrary.createEdgeDetectionStage();
+      silhouette.uniforms.color = Cesium.Color.ROYALBLUE;
       silhouette.uniforms.length = 0.01;
       silhouette.selected = [];
 
-      const silhouetteStage = PostProcessStageLibrary.createSilhouetteStage([silhouette]);
+      const silhouetteStage = Cesium.PostProcessStageLibrary.createSilhouetteStage([silhouette]);
       scene.postProcessStages.add(silhouetteStage);
 
       let lastPickTime = 0;
-      const mouseMoveEvent = ScreenSpaceEventType.MOUSE_MOVE;
+      const mouseMoveEvent = Cesium.ScreenSpaceEventType.MOUSE_MOVE;
       const onMove = ({ position }: { position: Cesium.Cartesian2 }) => {
         const now = performance.now();
         if (now - lastPickTime < 120) return;
@@ -655,9 +519,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         }
 
         // Consume the event so Origo's 2D logic stays disabled while the globe is active
-        e.preventDefault();
-        (e as any).stopImmediatePropagation?.();
-        e.stopPropagation();
+        stopDomEvent(e);
 
         if (!tool) {
           tool = measureTool(scene);
@@ -686,7 +548,6 @@ const Globe = function Globe(options: GlobeOptions = {}) {
     },
   };
 
-
   return Origo.ui.Component({
     name: 'globe',
     onAdd(evt: any) {
@@ -702,7 +563,7 @@ const Globe = function Globe(options: GlobeOptions = {}) {
           target: oGlobeTarget,
           time() {
             const value = (fp?.input as HTMLInputElement | undefined)?.value;
-            return JulianDate.fromDate(value ? new Date(value) : new Date());
+            return Cesium.JulianDate.fromDate(value ? new Date(value) : new Date());
           }
         });
       }
@@ -713,11 +574,24 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       const resolutionScaler = dynamicResolutionScaling(oGlobe, scene,{ forceLowEnd: false, forceHighEnd: false, debugLogs: true });
       registerCleanup(() => resolutionScaler?.dispose?.());
 
+      polygonUi = createPolygonUi({
+        scene,
+        map,
+        injectIntoMap,
+        requestSceneRender,
+        registerCleanup,
+        stopDomEvent,
+      });
+      registerCleanup(() => {
+        polygonUi?.destroy();
+        polygonUi = null;
+      });
+
       const onPostRender = () => patchCollections(scene);
       scene.postRender.addEventListener(onPostRender);
       registerCleanup(() => scene.postRender.removeEventListener(onPostRender));
 
-      const handler = new ScreenSpaceEventHandler(scene.canvas);
+      const handler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
       cesiumHandler = handler;
 
       registerOptionalCleanup(helpers.addStreetView(streetView, handler, oGlobe));
@@ -729,6 +603,13 @@ const Globe = function Globe(options: GlobeOptions = {}) {
       helpers.setActiveControls(oGlobe, viewer);
       registerOptionalCleanup(helpers.pickedFeatureStyle(handler));
       registerOptionalCleanup(helpers.addMeasureTool(scene));
+
+      // If opened via a share URL, auto-enable 3D and load/zoom to polygons
+      try {
+        registerOptionalCleanup(polygonUi?.loadSharedPolygonsFromUrl());
+      } catch (e) {
+        // ignore
+      }
 
       CameraControls(scene);
       getFeatureInfo(scene, viewer, map, featureInfo, helpers.flyTo);
@@ -793,6 +674,29 @@ const Globe = function Globe(options: GlobeOptions = {}) {
           tooltipPlacement: 'east'
         });
         buttons.push(viewshedButton);
+      }
+
+      if (drawTool) {
+        drawToolButton = Origo.ui.Button({
+          cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow',
+          click() {
+            if (!drawToolButton) return;
+            const el = document.getElementById(drawToolButton.getId());
+            if (el) {
+              const active = el.classList.toggle('active');
+              if (active) {
+                polygonUi?.mountPolygonToolbarIfNeeded();
+                polygonUi?.setPolygonToolbarVisible(true);
+              } else {
+                polygonUi?.setPolygonToolbarVisible(false);
+              }
+            }
+          },
+          icon: '#fa-pencil',
+          tooltipText: 'Ritverktyg',
+          tooltipPlacement: 'east'
+        });
+        buttons.push(drawToolButton);
       }
 
       if (quickTimeShadowPicker) {
@@ -870,6 +774,10 @@ const Globe = function Globe(options: GlobeOptions = {}) {
 
         if (quickTimeShadowPicker) {
           appendButton(quickTimePickerButton);
+        }
+
+        if (drawTool) {
+          appendButton(drawToolButton);
         }
 
         if (viewShed) {
