@@ -36,15 +36,14 @@ All globe settings can be configured in `index.json` under the `"3D"` section. T
     "globeOnStart": true,
     "viewShed": true,
     "streetView": true,
-    "streetViewMap": "webservices:topowebbkartan",
-    "fx": false,
+    "streetViewMap": "name of a layer from 'ayers' config",
     "drawTool": {
       "active": true,
       "options": {
         "export": {
           "geojson": true,
           "dxf": true,
-          "dxfCrs": ["EPSG:3008", "EPSG:4326"]
+          "dxfCrs": ["EPSG:3006", "EPSG:4326"]
         },
         "share": true,
         "defaultColor": "white",
@@ -55,7 +54,6 @@ All globe settings can be configured in `index.json` under the `"3D"` section. T
     "measure": true,
     "quickTimeShadowPicker": true,
     "flyTo": false,
-    "deactivateControls": [],
     "settings": {
       "depthTestAgainstTerrain": true,
       "enableAtmosphere": true,
@@ -83,7 +81,7 @@ All globe settings can be configured in `index.json` under the `"3D"` section. T
       }
     },
     "cesiumIontoken": "your-cesium-ion-token",
-    "cesiumTerrainProvider": "data/TerrainOptimized17/"
+    "cesiumTerrainProvider": "path/to/your/terrain"
   }
 }
 ```

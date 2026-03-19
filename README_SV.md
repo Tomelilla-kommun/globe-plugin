@@ -36,7 +36,7 @@ Alla globinställningar kan konfigureras i `index.json` under sektionen `"3D"`. 
     "globeOnStart": true,
     "viewShed": true,
     "streetView": true,
-    "streetViewMap": "webservices:topowebbkartan",
+    "streetViewMap": "Namn av ett av lagren från 'layers'",
     "fx": false,
     "drawTool": {
       "active": true,
@@ -83,7 +83,7 @@ Alla globinställningar kan konfigureras i `index.json` under sektionen `"3D"`. 
       }
     },
     "cesiumIontoken": "din-cesium-ion-token",
-    "cesiumTerrainProvider": "data/TerrainOptimized17/"
+        "cesiumTerrainProvider": "sökväg/till/din/terräng"
   }
 }
 ```
