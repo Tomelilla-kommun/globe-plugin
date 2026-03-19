@@ -1,32 +1,30 @@
 import * as Cesium from 'cesium';
 
-import polygonDrawTool from '../functions/polygonDrawTool';
-import { polygonToolbarHtml } from '../uiTemplates';
+import polygonDrawTool, { PolygonData } from '../functions/polygonDrawTool';
+import { polygonToolbarHtml, polygonEditPanelHtml, PolygonToolbarOptions } from '../uiTemplates';
 import {
   decodeCompressedBase64UrlToJson,
   encodeCompressedJsonToBase64Url,
   roundGeoJsonForShare,
 } from './shareCodec';
 
-import type { CleanupFn, GeoJsonFeatureCollection } from './types';
+import type { CleanupFn } from './types';
 
-const clamp01 = (value: number, fallback: number) => {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(1, Math.max(0, n));
-};
+export interface DrawToolExportOptions {
+  geojson?: boolean;
+  dxf?: boolean;
+  dxfCrs?: string[];
+}
 
-const getCesiumColorByName = (name: string): Cesium.Color => {
-  switch ((name ?? '').toLowerCase()) {
-    case 'white': return Cesium.Color.WHITE;
-    case 'red': return Cesium.Color.RED;
-    case 'green': return Cesium.Color.LIME;
-    case 'blue': return Cesium.Color.DODGERBLUE;
-    case 'yellow': return Cesium.Color.YELLOW;
-    case 'cyan': return Cesium.Color.CYAN;
-    default: return Cesium.Color.WHITE;
-  }
-};
+export interface DrawToolOptions {
+  active?: boolean;
+  options?: {
+    export?: DrawToolExportOptions | boolean;
+    share?: boolean;
+    defaultColor?: string;
+    defaultHeight?: number;
+  };
+}
 
 export interface PolygonUiApi {
   mountPolygonToolbarIfNeeded(): void;
@@ -42,6 +40,7 @@ export const createPolygonUi = (deps: {
   requestSceneRender: () => void;
   registerCleanup: (cleanup?: CleanupFn) => void;
   stopDomEvent: (event: Event) => void;
+  drawToolOptions?: DrawToolOptions;
 }): PolygonUiApi => {
   const {
     scene,
@@ -50,224 +49,78 @@ export const createPolygonUi = (deps: {
     requestSceneRender,
     registerCleanup,
     stopDomEvent,
+    drawToolOptions = {},
   } = deps;
 
-  let sharedPolygonLabelCollection: Cesium.LabelCollection | null = null;
-  let sharedPolygonLabels: Cesium.Label[] = [];
-  let sharedPolygonLabelsVisible = true;
-
-  let sharedPolygonsCleanup: CleanupFn | null = null;
-  let sharedPolygonsGeoJson: GeoJsonFeatureCollection | null = null;
-
-  const renderSharedPolygonsFromFeatures = (
-    targetScene: Cesium.Scene,
-    features: any[],
-    options: { flyTo?: boolean } = {}
-  ): CleanupFn => {
-    // Replace any previous shared labels
-    if (sharedPolygonLabelCollection) {
-      try {
-        targetScene.primitives.remove(sharedPolygonLabelCollection);
-      } catch {
-        // ignore
-      }
-    }
-
-    sharedPolygonLabels = [];
-    const labelCollection = new Cesium.LabelCollection();
-    sharedPolygonLabelCollection = labelCollection;
-    targetScene.primitives.add(labelCollection);
-
-    const createdPrimitives: Cesium.Primitive[] = [];
-    const allPositions: Cesium.Cartesian3[] = [];
-
-    const toPositions = (ring: any[], baseHeight: number) => {
-      if (!Array.isArray(ring) || ring.length < 3) return [];
-      // GeoJSON rings are typically closed; drop last coord if it matches first
-      const coords = ring.slice();
-      const first = coords[0];
-      const last = coords[coords.length - 1];
-      if (Array.isArray(first) && Array.isArray(last) && first[0] === last[0] && first[1] === last[1]) {
-        coords.pop();
-      }
-      return coords
-        .filter((c) => Array.isArray(c) && c.length >= 2)
-        .map(([lng, lat]) => Cesium.Cartesian3.fromDegrees(Number(lng), Number(lat), baseHeight));
-    };
-
-    for (const feature of features) {
-      if (feature?.geometry?.type !== 'Polygon') continue;
-      const ring = feature.geometry?.coordinates?.[0];
-      const baseHeight = Number(feature?.properties?.baseHeight ?? 0);
-      const extrudeHeight = Number(feature?.properties?.extrudeHeight ?? 10);
-      const area = Number(feature?.properties?.area ?? NaN);
-
-      let baseColor = Cesium.Color.WHITE;
-      const colorProp = feature?.properties?.color;
-      if (typeof colorProp === 'string') {
-        try {
-          baseColor = Cesium.Color.fromCssColorString(colorProp) ?? baseColor;
-        } catch {
-          // ignore
-        }
-      }
-
-      const fillAlpha = clamp01(feature?.properties?.fillAlpha, 0.7);
-      const outlineColor = baseColor.withAlpha(1);
-      const fillColor = baseColor.withAlpha(fillAlpha);
-
-      const positions = toPositions(ring, baseHeight);
-      if (positions.length < 3) continue;
-      allPositions.push(...positions);
-
-      // Outline
-      const outlinePositions = [...positions, positions[0]];
-      const outlineInstance = new Cesium.GeometryInstance({
-        geometry: new Cesium.PolylineGeometry({
-          positions: outlinePositions,
-          width: 2,
-        }),
-        attributes: {
-          color: Cesium.ColorGeometryInstanceAttribute.fromColor(outlineColor),
-        },
-      });
-
-      const outlinePrimitive = new Cesium.Primitive({
-        geometryInstances: [outlineInstance],
-        appearance: new Cesium.PolylineColorAppearance({}),
-      });
-      targetScene.primitives.add(outlinePrimitive);
-      createdPrimitives.push(outlinePrimitive);
-
-      // Extruded polygon
-      const polygonInstance = new Cesium.GeometryInstance({
-        geometry: new Cesium.PolygonGeometry({
-          polygonHierarchy: { positions, holes: [] },
-          extrudedHeight: baseHeight + extrudeHeight,
-          perPositionHeight: false,
-        }),
-        attributes: {
-          color: Cesium.ColorGeometryInstanceAttribute.fromColor(fillColor),
-        },
-      });
-
-      const polygonPrimitive = new Cesium.Primitive({
-        geometryInstances: [polygonInstance],
-        appearance: new Cesium.PerInstanceColorAppearance({
-          translucent: fillAlpha < 1,
-          closed: true,
-        }),
-        shadows: Cesium.ShadowMode.ENABLED,
-      });
-      targetScene.primitives.add(polygonPrimitive);
-      createdPrimitives.push(polygonPrimitive);
-
-      // Measurement label (Base/Height/Top/Area)
-      // Compute a simple center from lon/lat averages (ring uses [lng,lat] degrees)
-      let centerLng = 0;
-      let centerLat = 0;
-      let count = 0;
-      if (Array.isArray(ring)) {
-        // Drop closing coord if it's identical to the first
-        const coords = ring.slice();
-        const first = coords[0];
-        const last = coords[coords.length - 1];
-        if (Array.isArray(first) && Array.isArray(last) && first[0] === last[0] && first[1] === last[1]) {
-          coords.pop();
-        }
-        for (const c of coords) {
-          if (!Array.isArray(c) || c.length < 2) continue;
-          centerLng += Number(c[0]);
-          centerLat += Number(c[1]);
-          count += 1;
-        }
-      }
-
-      if (count > 0) {
-        centerLng /= count;
-        centerLat /= count;
-
-        const label = labelCollection.add({
-          position: Cesium.Cartesian3.fromDegrees(centerLng, centerLat, baseHeight + extrudeHeight / 2),
-          text: `Base: ${baseHeight.toFixed(2)}m\nHeight: ${extrudeHeight}m\nTop: ${(baseHeight + extrudeHeight).toFixed(2)}m${Number.isFinite(area) ? `\nArea: ${area.toFixed(1)} m²` : ''}`,
-          font: '22px sans-serif',
-          fillColor: Cesium.Color.WHITE,
-          outlineColor: Cesium.Color.BLACK,
-          outlineWidth: 2,
-          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-          verticalOrigin: Cesium.VerticalOrigin.CENTER,
-          horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
-          disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          show: sharedPolygonLabelsVisible,
-        });
-        sharedPolygonLabels.push(label);
-      }
-    }
-
-    // Zoom to extent (with some padding)
-    if (options.flyTo && allPositions.length) {
-      const rect = Cesium.Rectangle.fromCartesianArray(allPositions);
-
-      // Pad the extent so we don't zoom in too tight
-      const width = rect.east - rect.west;
-      const height = rect.north - rect.south;
-      const minPad = Cesium.Math.toRadians(0.002);
-      const padX = Math.max(Math.abs(width) * 0.25, minPad);
-      const padY = Math.max(Math.abs(height) * 0.25, minPad);
-
-      const paddedRect = new Cesium.Rectangle(
-        Math.max(-Math.PI, rect.west - padX),
-        Math.max(-Cesium.Math.PI_OVER_TWO, rect.south - padY),
-        Math.min(Math.PI, rect.east + padX),
-        Math.min(Cesium.Math.PI_OVER_TWO, rect.north + padY)
-      );
-
-      targetScene.camera.flyTo({
-        destination: paddedRect,
-        duration: 2.0,
-        complete: requestSceneRender,
-      });
-      requestSceneRender();
-    }
-
-    let disposed = false;
-    const cleanup: CleanupFn = () => {
-      if (disposed) return;
-      disposed = true;
-
-      createdPrimitives.forEach((p) => {
-        try {
-          targetScene.primitives.remove(p);
-        } catch {
-          // ignore
-        }
-      });
-
-      if (labelCollection) {
-        try {
-          targetScene.primitives.remove(labelCollection);
-        } catch {
-          // ignore
-        }
-        if (sharedPolygonLabelCollection === labelCollection) {
-          sharedPolygonLabelCollection = null;
-          sharedPolygonLabels = [];
-        }
-      }
-
-      if (sharedPolygonsCleanup === cleanup) {
-        sharedPolygonsCleanup = null;
-      }
-
-      requestSceneRender();
-    };
-
-    return cleanup;
-  };
+  // Parse drawTool options
+  console.log('[Globe DEBUG] drawToolOptions received:', JSON.stringify(drawToolOptions, null, 2));
+  const toolOptions = drawToolOptions.options || {};
+  console.log('[Globe DEBUG] toolOptions:', JSON.stringify(toolOptions, null, 2));
+  const exportConfig = typeof toolOptions.export === 'object' ? toolOptions.export : 
+    (toolOptions.export === false ? { geojson: false, dxf: false } : { geojson: true, dxf: true });
+  console.log('[Globe DEBUG] exportConfig:', JSON.stringify(exportConfig, null, 2));
+  const showShare = toolOptions.share !== false;
+  const defaultColor = toolOptions.defaultColor || 'white';
+  const defaultHeight = toolOptions.defaultHeight ?? 10;
+  const dxfCrs = exportConfig.dxfCrs || ['EPSG:3006'];
+  const showGeojson = exportConfig.geojson !== false;
+  const showDxf = exportConfig.dxf !== false;
+  console.log('[Globe DEBUG] Final config: dxfCrs=', dxfCrs, 'showGeojson=', showGeojson, 'showDxf=', showDxf);
 
   let polygonToolbarEl: HTMLElement | null = null;
+  let polygonEditPanelEl: HTMLElement | null = null;
   let polygonTool: ReturnType<typeof polygonDrawTool> | null = null;
   let polygonToolIsDrawing = false;
+  let rectangleToolIsDrawing = false;
+
+  const hideEditPanel = () => {
+    if (polygonEditPanelEl) {
+      polygonEditPanelEl.style.display = 'none';
+    }
+    // Close any open popovers
+    document.getElementById('polygon-edit-height-popover')?.classList.remove('o-active');
+    document.getElementById('polygon-edit-color-popover')?.classList.remove('o-active');
+  };
+
+  const showEditPanel = (polygon: PolygonData) => {
+    if (!polygonEditPanelEl) return;
+
+    polygonEditPanelEl.style.display = 'flex';
+
+    // Populate fields with polygon data
+    const nameInput = document.getElementById('polygon-edit-name') as HTMLInputElement | null;
+    const heightInput = document.getElementById('polygon-edit-height-input') as HTMLInputElement | null;
+    const colorSelect = document.getElementById('polygon-edit-color-select') as HTMLSelectElement | null;
+    const opacityButton = document.getElementById('polygon-edit-opacity-toggle') as HTMLButtonElement | null;
+
+    if (nameInput) {
+      nameInput.value = polygon.name || '';
+    }
+    if (heightInput) {
+      heightInput.value = String(polygon.extrudeHeight || 10);
+    }
+    if (colorSelect) {
+      // Try to match color
+      const colorCss = polygon.color?.toCssColorString?.() || '';
+      const colorName = getColorNameFromCss(colorCss);
+      colorSelect.value = colorName;
+    }
+    if (opacityButton) {
+      const isOpaque = polygon.fillAlpha >= 0.999;
+      opacityButton.classList.toggle('active', isOpaque);
+    }
+  };
+
+  const getColorNameFromCss = (css: string): string => {
+    const lower = css.toLowerCase();
+    if (lower.includes('255, 255, 255') || lower === '#ffffff' || lower === 'white') return 'white';
+    if (lower.includes('255, 0, 0') || lower === '#ff0000' || lower === 'red') return 'red';
+    if (lower.includes('0, 255, 0') || lower === '#00ff00' || lower === 'lime') return 'green';
+    if (lower.includes('30, 144, 255') || lower.includes('dodgerblue')) return 'blue';
+    if (lower.includes('255, 255, 0') || lower === '#ffff00' || lower === 'yellow') return 'yellow';
+    if (lower.includes('0, 255, 255') || lower === '#00ffff' || lower === 'cyan') return 'cyan';
+    return 'white';
+  };
 
   const setPolygonToolbarVisible = (visible: boolean) => {
     if (!polygonToolbarEl) return;
@@ -276,16 +129,48 @@ export const createPolygonUi = (deps: {
     if (!visible) {
       const heightPopover = document.getElementById('polygon-height-popover') as HTMLElement | null;
       heightPopover?.classList.remove('o-active');
+      hideEditPanel();
+      
+      // Disable selection when toolbar is hidden
+      if (polygonTool && typeof (polygonTool as any).disableSelection === 'function') {
+        (polygonTool as any).disableSelection();
+      }
+    } else {
+      // Enable selection when toolbar is shown
+      if (polygonTool && typeof (polygonTool as any).enableSelection === 'function') {
+        (polygonTool as any).enableSelection((polygon: PolygonData | null) => {
+          if (polygon) {
+            showEditPanel(polygon);
+          } else {
+            hideEditPanel();
+          }
+        });
+      }
     }
 
-    if (!visible && polygonTool && polygonToolIsDrawing && typeof (polygonTool as any).stopDrawing === 'function') {
-      (polygonTool as any).stopDrawing();
-      polygonToolIsDrawing = false;
+    if (!visible && polygonTool) {
+      // Stop polygon drawing if active
+      if (polygonToolIsDrawing && typeof (polygonTool as any).stopDrawing === 'function') {
+        (polygonTool as any).stopDrawing();
+        polygonToolIsDrawing = false;
 
-      const drawBtn = document.getElementById('polygon-draw') as HTMLButtonElement | null;
-      if (drawBtn) {
-        drawBtn.classList.remove('active');
+        const drawBtn = document.getElementById('polygon-draw') as HTMLButtonElement | null;
+        if (drawBtn) {
+          drawBtn.classList.remove('active');
+        }
       }
+
+      // Stop rectangle drawing if active
+      if (rectangleToolIsDrawing && typeof (polygonTool as any).stopDrawingRectangle === 'function') {
+        (polygonTool as any).stopDrawingRectangle();
+        rectangleToolIsDrawing = false;
+
+        const rectBtn = document.getElementById('rectangle-draw') as HTMLButtonElement | null;
+        if (rectBtn) {
+          rectBtn.classList.remove('active');
+        }
+      }
+
       const heightInput = document.getElementById('polygon-height-compact') as HTMLInputElement | null;
       if (heightInput) {
         heightInput.disabled = false;
@@ -298,11 +183,18 @@ export const createPolygonUi = (deps: {
     if (polygonToolbarEl) return;
     if (!scene) return;
 
-    polygonToolbarEl = injectIntoMap(polygonToolbarHtml()) ?? null;
+    const toolbarOptions: PolygonToolbarOptions = {
+      showGeojson,
+      showDxf,
+      dxfCrs,
+      showShare,
+    };
+    polygonToolbarEl = injectIntoMap(polygonToolbarHtml(toolbarOptions)) ?? null;
     if (!polygonToolbarEl) return;
     polygonToolbarEl.style.display = 'none';
 
     const drawButton = document.getElementById('polygon-draw') as HTMLButtonElement | null;
+    const rectangleButton = document.getElementById('rectangle-draw') as HTMLButtonElement | null;
     const heightButton = document.getElementById('polygon-height-button') as HTMLButtonElement | null;
     const heightPopover = document.getElementById('polygon-height-popover') as HTMLElement | null;
     const colorButton = document.getElementById('polygon-color-button') as HTMLButtonElement | null;
@@ -310,20 +202,33 @@ export const createPolygonUi = (deps: {
     const colorSelect = document.getElementById('polygon-color-select') as HTMLSelectElement | null;
     const opacityButton = document.getElementById('polygon-opacity-toggle') as HTMLButtonElement | null;
     const clearButton = document.getElementById('polygon-clear-compact') as HTMLButtonElement | null;
-    const downloadButton = document.getElementById('polygon-download-geojson') as HTMLButtonElement | null;
+    const downloadButton = document.getElementById('polygon-download-button') as HTMLButtonElement | null;
+    const downloadPopover = document.getElementById('polygon-download-popover') as HTMLElement | null;
+    const downloadGeojsonButton = document.getElementById('polygon-download-geojson') as HTMLButtonElement | null;
     const shareButton = document.getElementById('polygon-share') as HTMLButtonElement | null;
     const toggleLabelsButton = document.getElementById('polygon-toggle-labels') as HTMLButtonElement | null;
     const heightInput = document.getElementById('polygon-height-compact') as HTMLInputElement | null;
 
     polygonTool = polygonDrawTool(scene);
     polygonToolIsDrawing = false;
+    rectangleToolIsDrawing = false;
 
-    // Defaults: transparent + white
+    // Apply defaults from config
     try {
-      (polygonTool as any)?.setColorByName?.('white');
+      (polygonTool as any)?.setColorByName?.(defaultColor);
       (polygonTool as any)?.setOpaque?.(false);
+      (polygonTool as any)?.setHeight?.(defaultHeight);
     } catch {
       // ignore
+    }
+
+    // Set default height in input
+    if (heightInput) {
+      heightInput.value = String(defaultHeight);
+    }
+    // Set default color in select
+    if (colorSelect) {
+      colorSelect.value = defaultColor;
     }
 
     const attachPopoverToggle = (
@@ -334,13 +239,23 @@ export const createPolygonUi = (deps: {
       if (!buttonEl || !popoverEl) return;
 
       let isDisposed = false;
+      
       const close = () => {
         if (isDisposed) return;
         popoverEl.classList.remove('o-active');
+        document.removeEventListener('click', onDocumentClick, true);
         try {
           map?.un?.('click', close);
         } catch {
           // ignore
+        }
+      };
+
+      const onDocumentClick = (e: MouseEvent) => {
+        // Close if click is outside the popover and button
+        const target = e.target as Node;
+        if (!popoverEl.contains(target) && !buttonEl.contains(target)) {
+          close();
         }
       };
 
@@ -355,6 +270,10 @@ export const createPolygonUi = (deps: {
         }
 
         popoverEl.classList.add('o-active');
+        // Use setTimeout to avoid the current click triggering the close
+        setTimeout(() => {
+          document.addEventListener('click', onDocumentClick, true);
+        }, 0);
         try {
           map?.once?.('click', close);
         } catch {
@@ -370,42 +289,145 @@ export const createPolygonUi = (deps: {
         if (isDisposed) return;
         isDisposed = true;
         close();
+        document.removeEventListener('click', onDocumentClick, true);
         popoverEl.removeEventListener('click', onPopoverClick);
         buttonEl.removeEventListener('click', onButtonClick);
       };
       registerCleanup(cleanup);
     };
 
-    if (downloadButton) {
-      downloadButton.addEventListener('click', () => {
+    // Download popover
+    attachPopoverToggle(downloadButton, downloadPopover);
+
+    if (downloadGeojsonButton) {
+      downloadGeojsonButton.addEventListener('click', () => {
         if (!polygonTool) return;
         const geojson = polygonTool.getGeoJSON();
         const blob = new Blob([JSON.stringify(geojson, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = 'drawn_polygons.geojson';
+        a.download = 'drawn_polygons_EPSG4326.geojson';
         document.body.appendChild(a);
         a.click();
         setTimeout(() => {
           document.body.removeChild(a);
           URL.revokeObjectURL(url);
         }, 100);
+        // Close popover
+        downloadPopover?.classList.remove('o-active');
       });
     }
+
+    // Wire up dynamic DXF buttons
+    const dxfButtons = document.querySelectorAll('.polygon-download-dxf-btn');
+    dxfButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!polygonTool) return;
+        const crs = (btn as HTMLElement).dataset.crs || 'EPSG:3006';
+        const dxf = polygonTool.getDXF(crs);
+        const blob = new Blob([dxf], { type: 'application/dxf' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const safeCrs = crs.replace(/[^a-zA-Z0-9]/g, '_');
+        a.download = `drawn_polygons_${safeCrs}.dxf`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }, 100);
+        // Close popover
+        downloadPopover?.classList.remove('o-active');
+      });
+    });
+
+    // Popup for share confirmation
+    const showSharePopup = () => {
+      // Remove any existing popup
+      const existingPopup = document.getElementById('share-confirmation-popup');
+      if (existingPopup) {
+        existingPopup.remove();
+      }
+
+      // Create popup element
+      const popup = document.createElement('div');
+      popup.id = 'share-confirmation-popup';
+      popup.innerHTML = `
+        <div id="share-popup-backdrop" style="
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(0, 0, 0, 0.3);
+          z-index: 9998;
+        "></div>
+        <div id="share-popup-content" style="
+          position: fixed;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          background: white;
+          padding: 20px 30px;
+          border-radius: 8px;
+          box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+          z-index: 9999;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+          text-align: center;
+          min-width: 250px;
+        ">
+          <button id="share-popup-close" style="
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: none;
+            border: none;
+            font-size: 20px;
+            cursor: pointer;
+            color: #666;
+            padding: 4px 8px;
+            line-height: 1;
+          " aria-label="Stäng">×</button>
+          <p style="
+            margin: 0;
+            font-size: 15px;
+            color: #333;
+          ">Länk har sparats till urklipp</p>
+        </div>
+      `;
+      document.body.appendChild(popup);
+
+      const closePopup = () => {
+        popup.remove();
+      };
+
+      // Close on backdrop click
+      const backdrop = document.getElementById('share-popup-backdrop');
+      backdrop?.addEventListener('click', closePopup);
+
+      // Close on X button click
+      const closeBtn = document.getElementById('share-popup-close');
+      closeBtn?.addEventListener('click', closePopup);
+
+      // Auto-close after 3 seconds
+      setTimeout(closePopup, 3000);
+    };
 
     if (shareButton) {
       shareButton.addEventListener('click', async () => {
         if (!polygonTool) return;
-        const drawnGeojson = polygonTool.getGeoJSON();
-        const drawnFeatures = Array.isArray(drawnGeojson?.features) ? drawnGeojson.features : [];
-        const sharedFeatures = Array.isArray(sharedPolygonsGeoJson?.features) ? sharedPolygonsGeoJson.features : [];
-        const combinedGeojson = {
-          type: 'FeatureCollection',
-          features: [...sharedFeatures, ...drawnFeatures],
-        };
+        // All polygons (including imported shared ones) are now in polygonTool
+        const geojson = polygonTool.getGeoJSON();
+        const features = Array.isArray(geojson?.features) ? geojson.features : [];
 
-        const roundedGeojson = roundGeoJsonForShare(combinedGeojson, 6);
+        if (features.length === 0) {
+          shareButton.title = 'No polygons to share';
+          return;
+        }
+
+        const roundedGeojson = roundGeoJsonForShare({ type: 'FeatureCollection', features }, 6);
         const encoded = encodeCompressedJsonToBase64Url(roundedGeojson);
 
         const url = new URL(window.location.href);
@@ -415,15 +437,9 @@ export const createPolygonUi = (deps: {
         const shareUrl = url.toString();
         try {
           await navigator.clipboard.writeText(shareUrl);
-          shareButton.classList.add('active');
-          const oldTitle = shareButton.title;
-          shareButton.title = 'Copied!';
-          setTimeout(() => {
-            shareButton.title = oldTitle;
-            shareButton.classList.remove('active');
-          }, 1200);
+          showSharePopup();
         } catch {
-          window.prompt('Copy this link:', shareUrl);
+          window.prompt('Kopiera denna länk:', shareUrl);
         }
       });
     }
@@ -433,7 +449,7 @@ export const createPolygonUi = (deps: {
         if (polygonTool && typeof (polygonTool as any).getLabelsVisible === 'function') {
           return Boolean((polygonTool as any).getLabelsVisible());
         }
-        return sharedPolygonLabelsVisible;
+        return true;
       };
 
       toggleLabelsButton.classList.toggle('active', getCurrentVisible());
@@ -445,11 +461,6 @@ export const createPolygonUi = (deps: {
         if (polygonTool && typeof (polygonTool as any).setLabelsVisible === 'function') {
           (polygonTool as any).setLabelsVisible(next);
         }
-
-        sharedPolygonLabelsVisible = next;
-        sharedPolygonLabels.forEach((l) => {
-          l.show = next;
-        });
 
         toggleLabelsButton.classList.toggle('active', next);
         requestSceneRender();
@@ -476,28 +487,8 @@ export const createPolygonUi = (deps: {
           // ignore
         }
 
-        // Also update already-loaded shared polygons (from share URL)
-        try {
-          const colorCss = getCesiumColorByName(String(colorSelect.value)).toCssColorString();
-          if (sharedPolygonsGeoJson?.features?.length) {
-            sharedPolygonsGeoJson.features.forEach((f: any) => {
-              if (!f?.properties) f.properties = {};
-              f.properties.color = colorCss;
-              // preserve existing fillAlpha; default if missing
-              if (f.properties.fillAlpha == null) {
-                const currentOpaque = Boolean((polygonTool as any)?.getOpaque?.() ?? false);
-                f.properties.fillAlpha = currentOpaque ? 1 : 0.7;
-              }
-            });
-            // Re-render without zooming the camera
-            sharedPolygonsCleanup?.();
-            sharedPolygonsCleanup = renderSharedPolygonsFromFeatures(scene, sharedPolygonsGeoJson.features, {
-              flyTo: false,
-            });
-          }
-        } catch {
-          // ignore
-        }
+        // All polygons (including imported shared ones) are now managed by polygonTool
+        // so setColorByName already updated them
 
         if (polygonToolIsDrawing && typeof (polygonTool as any).updatePreviewWithLast === 'function') {
           (polygonTool as any).updatePreviewWithLast();
@@ -523,28 +514,8 @@ export const createPolygonUi = (deps: {
           // ignore
         }
 
-        // Also update already-loaded shared polygons (from share URL)
-        try {
-          const nextAlpha = isOpaque ? 1 : 0.7;
-          if (sharedPolygonsGeoJson?.features?.length) {
-            sharedPolygonsGeoJson.features.forEach((f: any) => {
-              if (!f?.properties) f.properties = {};
-              f.properties.fillAlpha = nextAlpha;
-              // preserve existing color; default if missing
-              if (typeof f.properties.color !== 'string') {
-                const currentColorName = String(colorSelect?.value ?? 'white');
-                f.properties.color = getCesiumColorByName(currentColorName).toCssColorString();
-              }
-            });
-            // Re-render without zooming the camera
-            sharedPolygonsCleanup?.();
-            sharedPolygonsCleanup = renderSharedPolygonsFromFeatures(scene, sharedPolygonsGeoJson.features, {
-              flyTo: false,
-            });
-          }
-        } catch {
-          // ignore
-        }
+        // All polygons (including imported shared ones) are now managed by polygonTool
+        // so setOpaque already updated them
 
         if (polygonToolIsDrawing && typeof (polygonTool as any).updatePreviewWithLast === 'function') {
           (polygonTool as any).updatePreviewWithLast();
@@ -555,11 +526,50 @@ export const createPolygonUi = (deps: {
       });
     }
 
+    // Helper to stop both drawing modes
+    const stopAllDrawing = () => {
+      if (polygonToolIsDrawing && typeof (polygonTool as any).stopDrawing === 'function') {
+        (polygonTool as any).stopDrawing();
+        polygonToolIsDrawing = false;
+        drawButton?.classList.remove('active');
+      }
+      if (rectangleToolIsDrawing && typeof (polygonTool as any).stopDrawingRectangle === 'function') {
+        (polygonTool as any).stopDrawingRectangle();
+        rectangleToolIsDrawing = false;
+        rectangleButton?.classList.remove('active');
+      }
+    };
+
+    // ESC key cancels drawing
+    const onEscKey = (e: KeyboardEvent) => {
+      if (e.code === 'Escape' && (polygonToolIsDrawing || rectangleToolIsDrawing)) {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        // Blur any focused button to prevent grayed-out appearance
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+        
+        stopAllDrawing();
+        requestSceneRender();
+      }
+    };
+    document.addEventListener('keydown', onEscKey, true); // Use capture phase
+    registerCleanup(() => document.removeEventListener('keydown', onEscKey, true));
+
     if (drawButton) {
       drawButton.addEventListener('click', () => {
         if (!polygonTool || !heightInput) return;
 
         if (!polygonToolIsDrawing) {
+          // Stop rectangle drawing if active
+          if (rectangleToolIsDrawing) {
+            (polygonTool as any).stopDrawingRectangle?.();
+            rectangleToolIsDrawing = false;
+            rectangleButton?.classList.remove('active');
+          }
+
           const height = parseFloat(heightInput.value) || 10;
           polygonTool.setHeight(height);
           polygonTool.startDrawing();
@@ -577,11 +587,41 @@ export const createPolygonUi = (deps: {
       });
     }
 
+    if (rectangleButton) {
+      rectangleButton.addEventListener('click', () => {
+        if (!polygonTool || !heightInput) return;
+
+        if (!rectangleToolIsDrawing) {
+          // Stop polygon drawing if active
+          if (polygonToolIsDrawing) {
+            (polygonTool as any).stopDrawing?.();
+            polygonToolIsDrawing = false;
+            drawButton?.classList.remove('active');
+          }
+
+          const height = parseFloat(heightInput.value) || 10;
+          polygonTool.setHeight(height);
+          (polygonTool as any).startDrawingRectangle();
+          rectangleToolIsDrawing = true;
+          rectangleButton.classList.add('active');
+        } else {
+          if (typeof (polygonTool as any).stopDrawingRectangle === 'function') {
+            (polygonTool as any).stopDrawingRectangle();
+          }
+          rectangleToolIsDrawing = false;
+          rectangleButton.classList.remove('active');
+          heightInput.disabled = false;
+        }
+        requestSceneRender();
+      });
+    }
+
     if (clearButton) {
       clearButton.addEventListener('click', () => {
+        // All polygons (including imported shared ones) are now managed by polygonTool
         polygonTool?.clear();
-        sharedPolygonsCleanup?.();
-        sharedPolygonsGeoJson = null;
+        // Also stop any active drawing
+        stopAllDrawing();
         requestSceneRender();
       });
     }
@@ -594,6 +634,151 @@ export const createPolygonUi = (deps: {
         if (polygonToolIsDrawing && typeof (polygonTool as any).updatePreviewWithLast === 'function') {
           (polygonTool as any).updatePreviewWithLast();
         }
+        requestSceneRender();
+      });
+    }
+
+    // Mount edit panel
+    mountEditPanelIfNeeded();
+  };
+
+  const mountEditPanelIfNeeded = () => {
+    if (polygonEditPanelEl) return;
+    if (!scene) return;
+
+    polygonEditPanelEl = injectIntoMap(polygonEditPanelHtml()) ?? null;
+    if (!polygonEditPanelEl) return;
+    polygonEditPanelEl.style.display = 'none';
+
+    const nameInput = document.getElementById('polygon-edit-name') as HTMLInputElement | null;
+    const heightButton = document.getElementById('polygon-edit-height-button') as HTMLButtonElement | null;
+    const heightPopover = document.getElementById('polygon-edit-height-popover') as HTMLElement | null;
+    const heightInput = document.getElementById('polygon-edit-height-input') as HTMLInputElement | null;
+    const colorButton = document.getElementById('polygon-edit-color-button') as HTMLButtonElement | null;
+    const colorPopover = document.getElementById('polygon-edit-color-popover') as HTMLElement | null;
+    const colorSelect = document.getElementById('polygon-edit-color-select') as HTMLSelectElement | null;
+    const opacityButton = document.getElementById('polygon-edit-opacity-toggle') as HTMLButtonElement | null;
+    const deleteButton = document.getElementById('polygon-edit-delete') as HTMLButtonElement | null;
+    const deselectButton = document.getElementById('polygon-edit-deselect') as HTMLButtonElement | null;
+
+    // Helper for edit panel popovers
+    const attachEditPopoverToggle = (
+      buttonEl: HTMLElement | null,
+      popoverEl: HTMLElement | null,
+      options: { onOpen?: () => void } = {}
+    ): void => {
+      if (!buttonEl || !popoverEl) return;
+
+      const closePopover = () => {
+        popoverEl.classList.remove('o-active');
+        document.removeEventListener('click', onDocumentClick);
+      };
+
+      const onDocumentClick = (e: Event) => {
+        // Check if click is outside the popover and button
+        const target = e.target as HTMLElement;
+        if (!popoverEl.contains(target) && !buttonEl.contains(target)) {
+          closePopover();
+        }
+      };
+
+      const onButtonClick = (e: Event) => {
+        stopDomEvent(e);
+        const isOpen = popoverEl.classList.contains('o-active');
+        if (isOpen) {
+          closePopover();
+        } else {
+          // Close any other open edit popovers first
+          document.getElementById('polygon-edit-height-popover')?.classList.remove('o-active');
+          document.getElementById('polygon-edit-color-popover')?.classList.remove('o-active');
+          
+          popoverEl.classList.add('o-active');
+          options.onOpen?.();
+          
+          // Add document click listener after a small delay to avoid immediate close
+          setTimeout(() => {
+            document.addEventListener('click', onDocumentClick);
+          }, 0);
+        }
+      };
+
+      buttonEl.addEventListener('click', onButtonClick);
+    };
+
+    attachEditPopoverToggle(heightButton, heightPopover, {
+      onOpen: () => {
+        if (heightInput) {
+          heightInput.focus();
+          heightInput.select();
+        }
+      },
+    });
+
+    attachEditPopoverToggle(colorButton, colorPopover);
+
+    // Name change handler
+    if (nameInput) {
+      nameInput.addEventListener('input', () => {
+        if (!polygonTool) return;
+        const selected = polygonTool.getSelectedPolygon?.();
+        if (!selected) return;
+        polygonTool.setPolygonName?.(selected.id, nameInput.value);
+      });
+    }
+
+    // Height change handler
+    if (heightInput) {
+      heightInput.addEventListener('input', () => {
+        if (!polygonTool) return;
+        const selected = polygonTool.getSelectedPolygon?.();
+        if (!selected) return;
+        const newHeight = parseFloat(heightInput.value) || 10;
+        polygonTool.setPolygonHeight?.(selected.id, newHeight);
+      });
+    }
+
+    // Color change handler
+    if (colorSelect) {
+      colorSelect.addEventListener('change', () => {
+        if (!polygonTool) return;
+        const selected = polygonTool.getSelectedPolygon?.();
+        if (!selected) return;
+        polygonTool.setPolygonColor?.(selected.id, colorSelect.value);
+        requestSceneRender();
+      });
+    }
+
+    // Opacity toggle handler
+    if (opacityButton) {
+      opacityButton.addEventListener('click', () => {
+        if (!polygonTool) return;
+        const selected = polygonTool.getSelectedPolygon?.();
+        if (!selected) return;
+        const currentOpaque = selected.fillAlpha >= 0.999;
+        polygonTool.setPolygonOpacity?.(selected.id, !currentOpaque);
+        opacityButton.classList.toggle('active', !currentOpaque);
+        requestSceneRender();
+      });
+    }
+
+    // Delete handler
+    if (deleteButton) {
+      deleteButton.addEventListener('click', () => {
+        if (!polygonTool) return;
+        const selected = polygonTool.getSelectedPolygon?.();
+        if (!selected) return;
+        polygonTool.deletePolygon?.(selected.id);
+        hideEditPanel();
+        requestSceneRender();
+      });
+    }
+
+    // Deselect handler
+    if (deselectButton) {
+      deselectButton.addEventListener('click', () => {
+        if (!polygonTool) return;
+        polygonTool.deselectPolygon?.();
+        hideEditPanel();
         requestSceneRender();
       });
     }
@@ -617,33 +802,69 @@ export const createPolygonUi = (deps: {
     const features: any[] = Array.isArray(geojson?.features) ? geojson.features : [];
     if (!features.length) return;
 
-    // Replace any previous shared polygons/primitives
-    if (sharedPolygonsCleanup) {
-      try {
-        sharedPolygonsCleanup();
-      } catch {
-        // ignore
+    // Ensure polygon tool is initialized
+    mountPolygonToolbarIfNeeded();
+    if (!polygonTool) {
+      console.warn('Could not initialize polygon tool for shared polygons');
+      return;
+    }
+
+    // Import each shared polygon into the polygon tool (making them editable)
+    const importedPolygons: PolygonData[] = [];
+    for (const feature of features) {
+      const imported = polygonTool.importPolygonFromGeoJSON(feature);
+      if (imported) {
+        importedPolygons.push(imported);
       }
     }
 
-    // Store for re-share (merge with newly drawn polygons)
-    sharedPolygonsGeoJson = {
-      type: 'FeatureCollection',
-      features: features.slice(),
-    };
+    if (!importedPolygons.length) return;
 
-    sharedPolygonsCleanup = renderSharedPolygonsFromFeatures(scene, features, { flyTo: true });
+    // Fly to imported polygons
+    const allPositions: Cesium.Cartesian3[] = [];
+    for (const polygon of importedPolygons) {
+      allPositions.push(...polygon.positions);
+    }
 
-    // Return a stable cleanup that always disposes the *current* shared render.
-    // (Shared polygons can be re-rendered when user changes color/opacity.)
-    const registeredCleanup: CleanupFn = () => {
-      try {
-        sharedPolygonsCleanup?.();
-      } catch {
-        // ignore
+    if (allPositions.length) {
+      const rect = Cesium.Rectangle.fromCartesianArray(allPositions);
+
+      // Pad the extent so we don't zoom in too tight
+      const width = rect.east - rect.west;
+      const height = rect.north - rect.south;
+      const minPad = Cesium.Math.toRadians(0.002);
+      const padX = Math.max(Math.abs(width) * 0.25, minPad);
+      const padY = Math.max(Math.abs(height) * 0.25, minPad);
+
+      const paddedRect = new Cesium.Rectangle(
+        Math.max(-Math.PI, rect.west - padX),
+        Math.max(-Cesium.Math.PI_OVER_TWO, rect.south - padY),
+        Math.min(Math.PI, rect.east + padX),
+        Math.min(Cesium.Math.PI_OVER_TWO, rect.north + padY)
+      );
+
+      scene.camera.flyTo({
+        destination: paddedRect,
+        duration: 2.0,
+        complete: requestSceneRender,
+      });
+      requestSceneRender();
+    }
+
+    // Enable selection so user can edit imported polygons
+    polygonTool.enableSelection((polygon: PolygonData | null) => {
+      if (polygon) {
+        showEditPanel(polygon);
+      } else {
+        hideEditPanel();
       }
-      sharedPolygonsCleanup = null;
-      sharedPolygonsGeoJson = null;
+    });
+    mountEditPanelIfNeeded();
+
+    // Return cleanup that will clear imported polygons
+    const registeredCleanup: CleanupFn = () => {
+      // Polygons are now managed by polygonTool, so clear() will handle them
+      // We don't need separate cleanup for shared polygons anymore
     };
 
     return registeredCleanup;
@@ -653,25 +874,9 @@ export const createPolygonUi = (deps: {
     polygonTool?.destroy();
     polygonTool = null;
     polygonToolbarEl = null;
+    polygonEditPanelEl = null;
     polygonToolIsDrawing = false;
-
-    try {
-      sharedPolygonsCleanup?.();
-    } catch {
-      // ignore
-    }
-    sharedPolygonsCleanup = null;
-    sharedPolygonsGeoJson = null;
-
-    if (sharedPolygonLabelCollection) {
-      try {
-        scene.primitives.remove(sharedPolygonLabelCollection);
-      } catch {
-        // ignore
-      }
-      sharedPolygonLabelCollection = null;
-      sharedPolygonLabels = [];
-    }
+    // All polygons (including imported shared ones) are now managed by polygonTool.destroy()
   };
 
   return {

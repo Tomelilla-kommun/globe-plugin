@@ -3,7 +3,7 @@
     "target": "ES6",
     "module": "ESNext",
     "moduleResolution": "node",
-    "lib": ["ES6", "DOM"],
+    "lib": ["ES2015", "DOM"],
     "allowJs": true,
     "checkJs": false,
     "jsx": "react",

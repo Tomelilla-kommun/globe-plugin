@@ -1,41 +1,107 @@
+/**
+ * Globe Plugin - Refactored Version
+ * 
+ * A modular 3D globe visualization plugin for Origo using Cesium/OLCesium.
+ * 
+ * Key improvements:
+ * - Modular button system (ButtonManager)
+ * - Centralized state management
+ * - Configuration validation
+ * - Extracted helpers and scene initialization
+ * - SVG icons module
+ */
+
 import * as Cesium from 'cesium';
 import flatpickr from 'flatpickr';
 import OLCesium from 'olcs/OLCesium';
 import Origo, { OrigoButton, OrigoElement } from 'Origo';
 
-import measureTool from './functions/measureTool';
+// Layer utilities
 import addGLTF from './layer/gltf';
 import { threedtile } from './layer/layerhelper';
-import getFeatureInfo from './functions/featureinfo';
+
+// Function imports
+import quickTimePicker from './functions/quickTimePicker';
+import timeSetter from './functions/timeSetter';
 import ViewShed from './functions/ViewShed';
 import StreetView from './functions/StreetView';
 import CameraControls from './functions/CameraControls';
 import dynamicResolutionScaling from './functions/dynamicResolutionScaling';
 import patchCollections from './functions/patchCollections';
-import quickTimePicker from './functions/quickTimePicker';
-import { setCameraHeight, getCameraHeight, setIsStreetMode, getIsStreetMode, isGlobeActive } from './globeState';
-import { streetViewHtml, cameraControlsHtml } from './uiTemplates';
-import { createElementFromMarkup, stopDomEvent } from './globe/domUtils';
-import { configureGlobeAppearance, configureScene, loadGltfAssets, loadTerrainProvider, load3DTiles } from './globe/sceneConfig';
-import { createPolygonUi } from './globe/polygonUi';
+import getFeatureInfo from './functions/featureinfo';
 
-import type { PolygonUiApi } from './globe/polygonUi';
-import type { CleanupFn, GLTFAsset, GlobeSettings } from './globe/types';
+// Globe module imports
+import { CleanupFn, GlobeSettings } from './globe/types';
+import { PolygonUiApi, createPolygonUi } from './globe/polygonUi';
+import { MeasureUiApi, createMeasureUi } from './globe/measureUi';
+import { setCameraHeight, setIsStreetMode, getCameraHeight, getIsStreetMode, isGlobeActive } from './globeState';
+import { processGlobeOptions } from './globe/configValidation';
+import { configureScene, configureGlobeAppearance, loadTerrainProvider, load3DTiles, loadGltfAssets } from './globe/sceneConfig';
+import { createElementFromMarkup, stopDomEvent } from './globe/domUtils';
+import { initializeSvgIcons } from './globe/svgIcons';
+
+// Button system
+import {
+  ButtonManager,
+  BUTTON_IDS,
+  GLOBE_DEPENDENT_BUTTONS,
+  SHADOW_DEPENDENT_BUTTONS,
+  getGlobeButtonConfigs,
+  type ButtonInstance,
+} from './buttons';
+
+// UI Templates
+import { streetViewHtml, cameraControlsHtml } from './uiTemplates';
+
+// Re-export types
+export type { DrawToolExportOptions, DrawToolOptions, GlobeOptions } from './globe/configValidation';
+
+// ============================================================================
+// Types
+// ============================================================================
+
+interface GlobeOptionsInput {
+  target?: string;
+  globeOnStart?: boolean;
+  showGlobe?: boolean;
+  streetView?: boolean;
+  streetViewMap?: string;
+  cameraControls?: boolean;
+  viewShed?: boolean;
+  measure?: boolean;
+  flyTo?: boolean;
+  quickTimeShadowPicker?: boolean;
+  drawTool?: boolean | { active?: boolean; options?: any };
+  fx?: boolean;
+  indexJson?: any;
+  resolutionScale?: number;
+  settings?: GlobeSettings;
+  cesiumTerrainProvider?: string;
+  cesiumIontoken?: string;
+  cesiumIonassetIdTerrain?: number;
+  gltf?: any[];
+  deactivateControls?: string[];
+}
+
+// ============================================================================
+// Cleanup Stack
+// ============================================================================
 
 class CleanupStack {
   private stack: CleanupFn[] = [];
 
   push(fn?: CleanupFn): void {
-    if (fn) {
-      this.stack.push(fn);
-    }
+    if (fn) this.stack.push(fn);
+  }
+
+  pushOptional(fn?: CleanupFn | void): void {
+    if (typeof fn === 'function') this.push(fn);
   }
 
   flush(): void {
     while (this.stack.length) {
-      const dispose = this.stack.pop();
       try {
-        dispose?.();
+        this.stack.pop()?.();
       } catch (error) {
         console.warn('Globe cleanup failed', error);
       }
@@ -43,96 +109,60 @@ class CleanupStack {
   }
 }
 
+// ============================================================================
+// Global Setup
+// ============================================================================
+
 declare global {
   interface Window {
     Cesium: typeof Cesium;
     OLCesium: typeof OLCesium;
     oGlobe?: any;
   }
-  interface ImportMeta {
-    hot?: {
-      dispose(callback: () => void): void;
-    };
-  }
 }
-
-interface GlobeOptions {
-  target?: string;
-  globeOnStart?: boolean;
-  showGlobe?: boolean;
-  streetView?: boolean;
-  cameraControls?: boolean;
-  viewShed?: boolean;
-  measure?: boolean;
-  flyTo?: boolean;
-  quickTimeShadowPicker?: boolean;
-  drawTool?: boolean;
-  fx?: boolean;
-  resolutionScale?: number;
-  settings?: GlobeSettings;
-  cesiumTerrainProvider?: string;
-  cesiumIontoken?: string;
-  cesiumIonassetIdTerrain?: number;
-  gltf?: GLTFAsset[];
-  deactivateControls?: string[];
-}
-
-const DEFAULT_OPTIONS: Required<Pick<GlobeOptions,
-  'showGlobe' |
-  'streetView' |
-  'cameraControls' |
-  'viewShed' |
-  'measure' |
-  'flyTo' |
-  'quickTimeShadowPicker' |
-  'drawTool' |
-  'fx'
->> & { deactivateControls: string[] } = {
-  showGlobe: true,
-  streetView: false,
-  cameraControls: false,
-  viewShed: false,
-  measure: false,
-  flyTo: false,
-  quickTimeShadowPicker: false,
-  drawTool: false,
-  fx: false,
-  deactivateControls: [],
-};
 
 setCameraHeight(1.6);
 setIsStreetMode(false);
 window.Cesium = Cesium;
 window.OLCesium = OLCesium;
 
-const Globe = function Globe(options: GlobeOptions = {}) {
-  const resolvedOptions = {
-    resolutionScale: window.devicePixelRatio,
-    settings: {},
-    ...DEFAULT_OPTIONS,
-    ...options,
-  };
+// ============================================================================
+// Globe Plugin
+// ============================================================================
 
-  let {
-    target,
+const Globe = function Globe(options: GlobeOptionsInput = {}) {
+  // DEBUG: Log incoming options
+  console.log('[Globe DEBUG] Globe() called with options:', options);
+  console.log('[Globe DEBUG] options.indexJson exists?', !!options.indexJson);
+  console.log('[Globe DEBUG] options.indexJson["3D"]:', options.indexJson?.['3D']);
+  
+  // Process and validate configuration
+  const { resolved: config } = processGlobeOptions(options);
+  
+  // DEBUG: Log resolved config
+  console.log('[Globe DEBUG] Resolved config:', config);
+  console.log('[Globe DEBUG] config.drawToolConfig:', config.drawToolConfig);
+
+  // Extract commonly used options
+  const {
     globeOnStart,
-    showGlobe,
-    resolutionScale,
-    settings,
-    cesiumTerrainProvider,
-    cesiumIontoken,
-    cesiumIonassetIdTerrain,
-    gltf,
-    deactivateControls,
-    streetView,
     viewShed,
-    cameraControls,
-    measure,
-    flyTo,
     quickTimeShadowPicker,
     drawTool,
     fx,
-  } = resolvedOptions;
+    streetView,
+    streetViewMap,
+    cameraControls,
+    measure,
+    settings,
+  } = config;
+
+  // Mutable target (may be set on init)
+  let target = config.target;
+
+  // ============================================================================
+  // State
+  // ============================================================================
 
   let map: any;
   let viewer: any;
@@ -141,439 +171,446 @@ const Globe = function Globe(options: GlobeOptions = {}) {
   let featureInfo: any;
   let scene: Cesium.Scene;
   let fp: flatpickr.Instance | null = null;
-
-  let globeEl: OrigoElement;
-  let globeButton: OrigoButton;
-  let flatpickrButton: OrigoButton;
-  let viewshedButton: OrigoButton | null = null;
-  let toggleShadowsButton: OrigoButton;
-  let quickTimePickerButton: OrigoButton | null = null;
-  let drawToolButton: OrigoButton | null = null;
-  let toggleFXButton: OrigoButton | null = null;
-
   let cesiumHandler: Cesium.ScreenSpaceEventHandler | undefined;
-  let pickHandler: Cesium.ScreenSpaceEventHandler | undefined;
+
+  // UI references
+  let globeEl: OrigoElement;
+  let polygonUi: PolygonUiApi | null = null;
+  let measureUi: MeasureUiApi | null = null;
+
+  // Button manager
+  const buttonManager = new ButtonManager();
+  let quickTimeButton: OrigoButton | null = null;
+
+  // Lifecycle
+  let hasActivatedOnStart = false;
+
+  // ============================================================================
+  // Cleanup Management
+  // ============================================================================
 
   const cleanupStack = new CleanupStack();
-  const registerCleanup = (cleanup?: CleanupFn) => cleanupStack.push(cleanup);
+  const registerCleanup = (fn?: CleanupFn) => cleanupStack.push(fn);
+  const registerOptionalCleanup = (fn?: CleanupFn | void) => cleanupStack.pushOptional(fn);
   const flushCleanups = () => cleanupStack.flush();
-  const registerOptionalCleanup = (maybeCleanup?: CleanupFn | void) => {
-    if (typeof maybeCleanup === 'function') {
-      registerCleanup(maybeCleanup);
-    }
-  };
 
-  const ownedDomNodes: HTMLElement[] = []; // track nodes mounted outside component root for cleanup
+  // DOM tracking
+  const ownedDomNodes: HTMLElement[] = [];
   const trackNode = (node: HTMLElement) => { ownedDomNodes.push(node); return node; };
   const cleanupDom = () => { ownedDomNodes.splice(0).forEach(n => n.remove()); };
+
+  // ============================================================================
+  // DOM Injection Helpers
+  // ============================================================================
 
   const injectAtBodyStart = (markup: string): HTMLElement | undefined => {
     if (typeof document === 'undefined' || !document.body) return undefined;
     const node = createElementFromMarkup(markup);
     if (!node) return undefined;
     document.body.insertBefore(node, document.body.firstChild);
-    trackNode(node);
-    return node;
+    return trackNode(node);
   };
+
   const injectIntoMap = (markup: string): HTMLElement | undefined => {
     if (typeof document === 'undefined' || !document.body) return undefined;
     const node = createElementFromMarkup(markup);
     if (!node) return undefined;
-
+    
     const parent = (target ? document.getElementById(target) : null)
-      ?? (document.querySelector('.o-map') as HTMLElement | null)
+      ?? document.querySelector('.o-map')
       ?? document.body;
     parent.appendChild(node);
-    trackNode(node);
-    return node;
-  };
-  const cleanupCesiumHandlers = () => {
-    cesiumHandler?.destroy(); cesiumHandler = undefined;
-    pickHandler?.destroy(); pickHandler = undefined;
+    return trackNode(node);
   };
 
-  const buttons: OrigoButton[] = [];
-
-  if (cesiumIontoken) {
-    Cesium.Ion.defaultAccessToken = cesiumIontoken;
-  }
+  // ============================================================================
+  // Request Render
+  // ============================================================================
 
   const requestSceneRender = () => scene?.requestRender();
 
-  let polygonUi: PolygonUiApi | null = null;
+  // Set Cesium Ion token
+  if (config.cesiumIontoken) {
+    Cesium.Ion.defaultAccessToken = config.cesiumIontoken;
+  }
+
+  // ============================================================================
+  // Globe Toggle Logic
+  // ============================================================================
 
   const toggleGlobe = (): void => {
     if (!viewer || !oGlobe || !scene) {
-      console.warn('Globe toggle ignored because viewer or scene is unavailable');
+      console.warn('Globe toggle ignored - viewer/scene unavailable');
       return;
     }
 
     const projection = viewer.getProjectionCode();
-    if (projection === 'EPSG:4326' || projection === 'EPSG:3857') {
-      oGlobe.setEnabled(!isGlobeActive(oGlobe));
-      requestSceneRender();
-      const streetViewEl = document.getElementById('streetView');
-      const controlUI = document.getElementById('controlUI');
-      const oToolsBottom = document.getElementById('o-tools-bottom');
-      const oConsole = document.getElementById('o-console');
-      const oFooterMiddle = document.getElementsByClassName('o-footer-middle')[0] as HTMLElement;
-      if (oFooterMiddle) {
-        oFooterMiddle.style.paddingLeft = isGlobeActive(oGlobe) ? '5px' : '0px';
-      }
-      if (oToolsBottom) {
-        oToolsBottom.style.display = isGlobeActive(oGlobe) ? 'none' : 'flex';
-      }
-      if (oConsole) {
-        oConsole.style.display = isGlobeActive(oGlobe) ? 'none' : 'flex';
-      }
-
-      if (streetViewEl && controlUI) {
-        streetViewEl.style.display = !isGlobeActive(oGlobe) ? 'none' : 'flex';
-        controlUI.style.display = !isGlobeActive(oGlobe) ? 'none' : 'flex';
-      }
-    } else {
-      console.error('Map projection must be EPSG:4326 or EPSG:3857 to be able to use globe mode.');
+    if (projection !== 'EPSG:4326' && projection !== 'EPSG:3857') {
+      console.error('Map projection must be EPSG:4326 or EPSG:3857 for globe mode');
+      return;
     }
+
+    oGlobe.setEnabled(!isGlobeActive(oGlobe));
+    requestSceneRender();
+
+    const active = isGlobeActive(oGlobe);
+
+    // Toggle UI visibility
+    const updates: [string | null, string, string][] = [
+      ['streetView', active ? 'flex' : 'none', 'flex'],
+      ['controlUI', active ? 'flex' : 'none', 'flex'],
+      ['o-tools-bottom', active ? 'none' : 'flex', 'flex'],
+      ['o-console', active ? 'none' : 'flex', 'flex'],
+    ];
+
+    updates.forEach(([id, activeStyle]) => {
+      if (id) {
+        const el = document.getElementById(id);
+        if (el) el.style.display = activeStyle;
+      }
+    });
+
+    const footer = document.getElementsByClassName('o-footer-middle')[0] as HTMLElement;
+    if (footer) footer.style.paddingLeft = active ? '5px' : '0px';
   };
 
+  // ============================================================================
+  // Button State Management
+  // ============================================================================
+
   const toggleButtons = (): void => {
-    const globeButtonEl = document.getElementById(globeButton.getId());
-    globeButtonEl?.classList.toggle('active');
+    const globeBtn = buttonManager.get(BUTTON_IDS.GLOBE);
+    if (!globeBtn) return;
 
-    const flatpickrButtonEl = document.getElementById(flatpickrButton.getId());
-    const viewshedButtonEl = viewshedButton ? document.getElementById(viewshedButton.getId()) : null;
-    const toggleShadowsButtonEl = document.getElementById(toggleShadowsButton.getId());
-    const quickTimePickerButtonEl = quickTimePickerButton ? document.getElementById(quickTimePickerButton.getId()) : null;
-    const toggleFXButtonEl = toggleFXButton ? document.getElementById(toggleFXButton.getId()) : null;
-    const drawToolButtonEl = drawToolButton ? document.getElementById(drawToolButton.getId()) : null;
+    const isActive = !globeBtn.isActive();
+    globeBtn.setActive(isActive);
 
-    const isActive = globeButtonEl?.classList.contains('active') ?? false;
-    flatpickrButtonEl?.classList.toggle('hidden', !isActive);
-    viewshedButtonEl?.classList.toggle('hidden', !isActive);
-    toggleShadowsButtonEl?.classList.toggle('hidden', !isActive);
-    quickTimePickerButtonEl?.classList.toggle('hidden', !isActive);
-    toggleFXButtonEl?.classList.toggle('hidden', !isActive);
-    drawToolButtonEl?.classList.toggle('hidden', !isActive);
+    // Show/hide dependent buttons
+    GLOBE_DEPENDENT_BUTTONS.forEach(id => {
+      buttonManager.get(id)?.setVisible(isActive);
+    });
 
+    // Also handle quickTime button if it exists
+    if (quickTimeButton) {
+      const el = document.getElementById(quickTimeButton.getId());
+      el?.classList.toggle('hidden', !isActive);
+    }
+
+    // Disable time pickers when shadows are off
+    const shadowsActive = buttonManager.get(BUTTON_IDS.SHADOWS)?.isActive() ?? false;
+    SHADOW_DEPENDENT_BUTTONS.forEach(id => {
+      buttonManager.get(id)?.setDisabled(!shadowsActive);
+    });
+    if (quickTimeButton) {
+      const el = document.getElementById(quickTimeButton.getId()) as HTMLButtonElement;
+      if (el) {
+        el.classList.toggle('disabled', !shadowsActive);
+        el.disabled = !shadowsActive;
+      }
+    }
+
+    // Deactivate draw tool when globe disabled
     if (!isActive) {
-      drawToolButtonEl?.classList.remove('active');
+      buttonManager.get(BUTTON_IDS.DRAW_TOOL)?.setActive(false);
       polygonUi?.setPolygonToolbarVisible(false);
     }
   };
 
-  let hasActivatedOnStart = false;
+  const setActiveControls = (globe: OLCesium, v: any): void => {
+    console.log(v);
+    if (!v) return;
+    config.deactivateControls.forEach((name: string) => {
+      const control = v.getControlByName(name);
+      if (!control) {
+        console.error(`No control "${name}" to toggle for globe`);
+      } else if (isGlobeActive(globe)) {
+        control.hide();
+      } else {
+        control.unhide();
+      }
+    });
+  };
 
-  const helpers = {
-    activeGlobeOnStart: (): void => {
-      if (!globeOnStart || hasActivatedOnStart || !oGlobe) return;
-      hasActivatedOnStart = true;
+  // ============================================================================
+  // Button Click Handlers
+  // ============================================================================
+
+  const buttonHandlers: Record<string, (btn: ButtonInstance, el: HTMLElement) => void> = {
+    [BUTTON_IDS.GLOBE]: () => {
       toggleGlobe();
       toggleButtons();
-      helpers.setActiveControls(oGlobe, viewer);
+      setActiveControls(oGlobe, viewer);
     },
-    showGlobeOption: (): void => {
-      if (!showGlobe && scene) {
-        scene.globe.show = false;
-        requestSceneRender();
-      }
-    },
-    cesiumCredits: (): void => {
-      const container = document.querySelector<HTMLElement>('.cesium-credit-logoContainer')?.parentNode as HTMLElement;
-      if (container) container.style.display = 'none';
-    },
-    setActiveControls: (getGlobe: OLCesium, v: any): void => {
-      if (!v) return;
-      deactivateControls.forEach((name) => {
-        const control = v.getControlByName(name);
-        if (!control) console.error(`No control named "${name}" to hide/unhide for globe control`);
-        else if (isGlobeActive(getGlobe)) control.hide();
-        else control.unhide();
-      });
-    },
-    timeSetter: (): CleanupFn | void => {
-      if (!target) return;
-      const parent = document.getElementById(target);
-      if (!parent) return;
-      const flatpickrEl = Origo.ui.Element({ tagName: 'div', cls: 'flatpickrEl z-index-ontop-top-times20' });
-      const markup = flatpickrEl.render();
-      const htmlNode = Origo.ui.dom.html(markup) as (HTMLElement | DocumentFragment | null);
-      const targetElement = htmlNode instanceof HTMLElement
-        ? htmlNode
-        : htmlNode?.firstElementChild as HTMLElement | null;
-      if (!htmlNode || !targetElement) return;
-      parent.appendChild(htmlNode);
-      trackNode(targetElement);
-      fp = flatpickr(targetElement, {
-        enableTime: true,
-        defaultDate: new Date(),
-        enableSeconds: true,
-        disableMobile: true,
-        time_24hr: true,
-      });
-      return () => {
-        fp?.destroy();
-        fp = null;
-        targetElement.remove();
-      };
-    },
-    flyTo: (destination: Cesium.Cartesian3, duration: number, orientation = { heading: 0, pitch: 0, roll: 0 }) => {
-      if (getIsStreetMode()) return;
-      if (flyTo) {
-        scene.camera.flyTo({
-          destination,
-          duration,
-          orientation,
-          complete: requestSceneRender
-        });
-      } else {
-        if (scene && scene.camera) {
-          const camera = scene.camera;
-          const destination = Cesium.Cartesian3.clone(camera.positionWC);
-          const orientation = {
-            heading: camera.heading,
-            pitch: camera.pitch,
-            roll: camera.roll
-          };
 
-          const freezeHandler = camera.changed.addEventListener(() => {
-            camera.setView({
-              destination,
-              orientation
-            });
-          });
+    [BUTTON_IDS.SHADOWS]: (btn) => {
+      if (!scene?.shadowMap) return;
+      const active = !btn.isActive();
+      btn.setActive(active);
+      scene.shadowMap.enabled = active;
 
-          setTimeout(() => {
-            if (freezeHandler) {
-              freezeHandler();
-            }
-          }, 600);
+      SHADOW_DEPENDENT_BUTTONS.forEach(id => {
+        buttonManager.get(id)?.setDisabled(!active);
+      });
+      if (quickTimeButton) {
+        const el = document.getElementById(quickTimeButton.getId()) as HTMLButtonElement;
+        if (el) {
+          el.classList.toggle('disabled', !active);
+          el.disabled = !active;
         }
       }
-    },
-    setView: (
-      destination: Cesium.Cartesian3,
-      orientation: { heading: number; pitch: number; roll: number }
-        ) => {
-      if (getIsStreetMode()) return;
-      scene.camera.setView({
-        destination,
-        orientation
-      });
       requestSceneRender();
     },
-    addSvgIcons: () => {
-      if (typeof document === 'undefined' || !document.body) return;
 
-      const svgNs = 'http://www.w3.org/2000/svg';
-      let spriteWrapper = document.getElementById('globe-svg-sprite') as HTMLElement | null;
-
-      if (!spriteWrapper) {
-        spriteWrapper = document.createElement('div');
-        spriteWrapper.id = 'globe-svg-sprite';
-        spriteWrapper.style.display = 'none';
-
-        const svg = document.createElementNS(svgNs, 'svg');
-        svg.setAttribute('xmlns', svgNs);
-        spriteWrapper.appendChild(svg);
-
-        document.body.insertBefore(spriteWrapper, document.body.firstChild ?? null);
-        trackNode(spriteWrapper);
-      }
-
-      let spriteSvg = spriteWrapper.querySelector('svg') as SVGSVGElement | null;
-      if (!spriteSvg) {
-        spriteSvg = document.createElementNS(svgNs, 'svg');
-        spriteSvg.setAttribute('xmlns', svgNs);
-        spriteWrapper.appendChild(spriteSvg);
-      }
-
-      const ensureSymbol = (id: string, viewBox: string, innerSvg: string) => {
-        if (document.getElementById(id)) return;
-        const symbol = document.createElementNS(svgNs, 'symbol');
-        symbol.setAttribute('id', id);
-        symbol.setAttribute('viewBox', viewBox);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (symbol as any).innerHTML = innerSvg;
-        spriteSvg!.appendChild(symbol);
-      };
-
-      // Existing globe icons
-      ensureSymbol(
-        'ic_cube_24px',
-        '0 0 24 24',
-        '<path d="M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L6.04,7.5L12,10.85L17.96,7.5L12,4.15Z" />'
-      );
-      ensureSymbol(
-        'ic_clock-time-four_24px',
-        '0 0 24 24',
-        '<path d="M12 2C6.5 2 2 6.5 2 12C2 17.5 6.5 22 12 22C17.5 22 22 17.5 22 12S17.5 2 12 2M16.3 15.2L11 12.3V7H12.5V11.4L17 13.9L16.3 15.2Z" />'
-      );
-      ensureSymbol(
-        'ic_box-shadow_24px',
-        '0 0 24 24',
-        '<path d="M3,3H18V18H3V3M19,19H21V21H19V19M19,16H21V18H19V16M19,13H21V15H19V13M19,10H21V12H19V10M19,7H21V9H19V7M16,19H18V21H16V19M13,19H15V21H13V19M10,19H12V21H10V19M7,19H9V21H7V19Z" />'
-      );
-      ensureSymbol(
-        'ic_chevron_right_24px',
-        '0 0 24 24',
-        '<path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />'
-      );
-
-      // Origo-style toolbar icons (fallbacks). If Origo already provides these IDs,
-      // we don't override them.
-      ensureSymbol(
-        'o_polygon_24px',
-        '0 0 24 24',
-        '<path d="M3 17.25V21h3.75l11.06-11.06-3.75-3.75L3 17.25zm2.92 2.08H5v-1.92l9.06-9.06 1.92 1.92-9.06 9.06zm13.06-12.19c.39-.39.39-1.02 0-1.41l-2.34-2.34a.995.995 0 0 0-1.41 0l-1.13 1.13 3.75 3.75 1.13-1.13z" />'
-      );
-      ensureSymbol(
-        'ic_height_24px',
-        '0 0 24 24',
-        '<path d="M7 2h10v2H7V2zm0 18h10v2H7v-2zM11 6h2v12h-2V6zm-3 3l-3 3 3 3V9zm8 0v6l3-3-3-3z" />'
-      );
-      ensureSymbol(
-        'ic_delete_24px',
-        '0 0 24 24',
-        '<path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />'
-      );
-      ensureSymbol(
-        'ic_share_24px',
-        '0 0 24 24',
-        '<path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.03-.47-.09-.7l7.02-4.11c.53.5 1.23.81 2.01.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.07 8.81C7.53 8.31 6.83 8 6.05 8c-1.66 0-3 1.34-3 3s1.34 3 3 3c.78 0 1.48-.31 2.01-.81l7.12 4.17c-.05.21-.08.43-.08.64 0 1.52 1.23 2.75 2.75 2.75s2.75-1.23 2.75-2.75-1.23-2.75-2.75-2.75z" />'
-      );
-      ensureSymbol(
-        'ic_title_24px',
-        '0 0 24 24',
-        '<path d="M3 5v14h18V5H3zm16 12H5V7h14v10z" /><path d="M7 9h10v2H7V9zm0 4h6v2H7v-2z" />'
-      );
-      ensureSymbol(
-        'ic_download_24px',
-        '0 0 24 24',
-        '<path d="M5 20h14v-2H5v2zm7-18c-.55 0-1 .45-1 1v10.59l-3.29-3.29c-.63-.63-1.71-.18-1.71.71 0 .39.16.77.44 1.06l5 5c.39.39 1.02.39 1.41 0l5-5c.28-.29.44-.67.44-1.06 0-.89-1.08-1.34-1.71-.71L13 13.59V3c0-.55-.45-1-1-1z" />'
-      );
+    [BUTTON_IDS.FLATPICKR]: (btn) => {
+      if (!fp) return;
+      const active = !btn.isActive();
+      btn.setActive(active);
+      active ? fp.open() : fp.close();
     },
-    addStreetView:(streetViewEnabled: boolean, handler: Cesium.ScreenSpaceEventHandler, globe: any): CleanupFn | void => {
-      if (streetViewEnabled) {
-        const node = injectAtBodyStart(streetViewHtml(`${getCameraHeight().toFixed(2)} m`));
-        void StreetView(scene, handler, globe);
-        return () => node?.remove();
-      }
-      return undefined;
+
+    [BUTTON_IDS.VIEWSHED]: (btn) => {
+      btn.setActive(!btn.isActive());
     },
-    addViewShed:(viewShedEnabled: boolean, handler: Cesium.ScreenSpaceEventHandler, button: OrigoButton | null) => {
-      if (viewShedEnabled && scene && button) {
-        ViewShed(scene, button, handler);
+
+    [BUTTON_IDS.DRAW_TOOL]: (btn) => {
+      const active = !btn.isActive();
+      btn.setActive(active);
+      if (active) {
+        polygonUi?.mountPolygonToolbarIfNeeded();
+        polygonUi?.setPolygonToolbarVisible(true);
+      } else {
+        polygonUi?.setPolygonToolbarVisible(false);
       }
     },
-    addControls: () => {
-      if (cameraControls) {
-        const node = injectAtBodyStart(cameraControlsHtml());
-        return () => node?.remove();
-      }
-      return undefined;
-    },
-    pickedFeatureStyle: (handler: Cesium.ScreenSpaceEventHandler): CleanupFn | void => {
-      if (!Cesium.PostProcessStageLibrary.isSilhouetteSupported(scene)) return;
 
-      const silhouette = Cesium.PostProcessStageLibrary.createEdgeDetectionStage();
-      silhouette.uniforms.color = Cesium.Color.ROYALBLUE;
-      silhouette.uniforms.length = 0.01;
-      silhouette.selected = [];
+    [BUTTON_IDS.FX]: (btn) => {
+      if (!scene?.shadowMap) return;
+      const active = !btn.isActive();
+      btn.setActive(active);
 
-      const silhouetteStage = Cesium.PostProcessStageLibrary.createSilhouetteStage([silhouette]);
-      scene.postProcessStages.add(silhouetteStage);
-
-      let lastPickTime = 0;
-      const mouseMoveEvent = Cesium.ScreenSpaceEventType.MOUSE_MOVE;
-      const onMove = ({ position }: { position: Cesium.Cartesian2 }) => {
-        const now = performance.now();
-        if (now - lastPickTime < 120) return;
-        lastPickTime = now;
-
-        const pickedFeature = position ? scene.pick(position) : undefined;
-        silhouette.selected = pickedFeature ? [pickedFeature] : [];
-        requestSceneRender();
-      };
-      handler.setInputAction(onMove, mouseMoveEvent);
-
-      return () => {
-        handler.removeInputAction(mouseMoveEvent);
-        scene.postProcessStages.remove(silhouetteStage);
-      };
-    },
-    addMeasureTool: (scene: Cesium.Scene): (() => void) | undefined => {
-      if (!measure) return;
-
-      const button = document.getElementsByClassName('o-measure')[0] as HTMLElement | undefined;
-      if (!button) return;
-
-      let tool: ReturnType<typeof measureTool> | null = null;
-
-      const originalOnClick = button.onclick; // keep default 2D handler
-      button.onclick = null; // avoid duplicate firing when globe mode hijacks the button
-
-      const onClick = (e: Event) => {
-        if (!isGlobeActive(oGlobe)) {
-          originalOnClick?.call(button, e as any);
-          return;
-        }
-
-        // Consume the event so Origo's 2D logic stays disabled while the globe is active
-        stopDomEvent(e);
-
-        if (!tool) {
-          tool = measureTool(scene);
-          tool.measureDistance();
-          button.classList.add('active');
-        } else {
-          tool.destroy();
-          tool = null;
-          button.classList.remove('active');
-        }
-
-        requestSceneRender();
-      };
-
-      button.addEventListener('click', onClick, true); // capture ensures we intercept before Origo handlers
-
-      return () => {
-        button.removeEventListener('click', onClick, true);
-
-        tool?.destroy();
-        tool = null;
-
-        button.onclick = originalOnClick ?? null; // restore default handler
-        button.classList.remove('active');
-      };
+      const shadows = settings?.shadows;
+      scene.shadowMap.normalOffset = active && shadows ? Boolean(shadows.normalOffset) : false;
+      scene.shadowMap.size = active && shadows ? shadows.size : 1024;
+      requestSceneRender();
     },
   };
 
+  // ============================================================================
+  // Helper Functions
+  // ============================================================================
+
+  const initTimeSetter = (): CleanupFn | void => {
+    if (!target) return;
+    const result = timeSetter({ target, trackNode, requestSceneRender });
+    if (!result) return;
+    fp = result.fp;
+    return () => {
+      result.cleanup();
+      fp = null;
+    };
+  };
+
+  const flyTo = (
+    destination: Cesium.Cartesian3,
+    duration: number,
+    orientation = { heading: 0, pitch: 0, roll: 0 }
+  ) => {
+    if (getIsStreetMode() || !scene) return;
+
+    if (config.flyTo) {
+      scene.camera.flyTo({
+        destination,
+        duration,
+        orientation,
+        complete: requestSceneRender,
+      });
+    } else {
+      const camera = scene.camera;
+      const frozenDest = Cesium.Cartesian3.clone(camera.positionWC);
+      const frozenOrient = {
+        heading: camera.heading,
+        pitch: camera.pitch,
+        roll: camera.roll,
+      };
+      const handler = camera.changed.addEventListener(() => {
+        camera.setView({ destination: frozenDest, orientation: frozenOrient });
+      });
+      setTimeout(() => handler?.(), 600);
+    }
+  };
+
+  const addStreetView = (handler: Cesium.ScreenSpaceEventHandler): CleanupFn | void => {
+    if (!streetView) return;
+    const node = injectAtBodyStart(streetViewHtml(`${getCameraHeight().toFixed(2)} m`));
+    void StreetView(scene, handler, oGlobe, streetViewMap);
+    return () => node?.remove();
+  };
+
+  const addCameraControls = (): CleanupFn | void => {
+    if (!cameraControls) return;
+    const node = injectAtBodyStart(cameraControlsHtml());
+    return () => node?.remove();
+  };
+
+  const addPickedFeatureStyle = (handler: Cesium.ScreenSpaceEventHandler): CleanupFn | void => {
+    if (!Cesium.PostProcessStageLibrary.isSilhouetteSupported(scene)) return;
+
+    const silhouette = Cesium.PostProcessStageLibrary.createEdgeDetectionStage();
+    silhouette.uniforms.color = Cesium.Color.ROYALBLUE;
+    silhouette.uniforms.length = 0.01;
+    silhouette.selected = [];
+
+    const stage = Cesium.PostProcessStageLibrary.createSilhouetteStage([silhouette]);
+    scene.postProcessStages.add(stage);
+
+    let lastPick = 0;
+    const onMove = ({ position }: { position: Cesium.Cartesian2 }) => {
+      const now = performance.now();
+      if (now - lastPick < 120) return;
+      lastPick = now;
+      const picked = position ? scene.pick(position) : undefined;
+      silhouette.selected = picked ? [picked] : [];
+      requestSceneRender();
+    };
+
+    handler.setInputAction(onMove, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+    return () => {
+      handler.removeInputAction(Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+      scene.postProcessStages.remove(stage);
+    };
+  };
+
+  const addMeasureTool = (): CleanupFn | void => {
+    if (!measure) return;
+
+    const button = document.getElementsByClassName('o-measure')[0] as HTMLElement;
+    if (!button) return;
+
+    const originalClick = button.onclick;
+    button.onclick = null;
+
+    const onClick = (e: Event) => {
+      if (!isGlobeActive(oGlobe)) {
+        originalClick?.call(button, e as any);
+        return;
+      }
+      stopDomEvent(e);
+      if (!measureUi) return;
+      const visible = measureUi.isMeasureToolbarVisible();
+      measureUi.setMeasureToolbarVisible(!visible);
+      button.classList.toggle('active', !visible);
+      requestSceneRender();
+    };
+
+    button.addEventListener('click', onClick, true);
+
+    return () => {
+      button.removeEventListener('click', onClick, true);
+      measureUi?.setMeasureToolbarVisible(false);
+      button.onclick = originalClick ?? null;
+      button.classList.remove('active');
+    };
+  };
+
+  const activeGlobeOnStart = (): void => {
+    if (!globeOnStart || hasActivatedOnStart || !oGlobe) return;
+    hasActivatedOnStart = true;
+    toggleGlobe();
+    toggleButtons();
+    setActiveControls(oGlobe, viewer);
+  };
+
+  const showGlobeOption = (): void => {
+    if (!config.showGlobe && scene) {
+      scene.globe.show = false;
+      requestSceneRender();
+    }
+  };
+
+  const cesiumCredits = (): void => {
+    const container = document.querySelector<HTMLElement>('.cesium-credit-logoContainer')?.parentNode as HTMLElement;
+    if (container) container.style.display = 'none';
+  };
+
+  // ============================================================================
+  // Origo Component
+  // ============================================================================
+
   return Origo.ui.Component({
     name: 'globe',
+
+    onInit() {
+      // Create container element
+      globeEl = Origo.ui.Element({
+        tagName: 'div',
+        cls: 'flex column z-index-ontop-top-times20',
+      });
+
+      // Register buttons with ButtonManager
+      const buttonConfigs = getGlobeButtonConfigs({
+        viewShed,
+        drawTool: !!drawTool,
+        quickTimeShadowPicker,
+        fx,
+      });
+
+      buttonConfigs.forEach(cfg => {
+        const handler = buttonHandlers[cfg.id];
+        if (handler || cfg.id === BUTTON_IDS.GLOBE) {
+          buttonManager.register({
+            ...cfg,
+            onClick: (btn, el) => (handler || buttonHandlers[BUTTON_IDS.GLOBE])?.(btn, el),
+          });
+        }
+      });
+
+      // Handle quickTimePicker separately (has custom button creation)
+      if (quickTimeShadowPicker) {
+        const picker = quickTimePicker(() => fp);
+        if (picker?.button) {
+          quickTimeButton = picker.button;
+          registerCleanup(picker.dispose);
+        }
+      }
+    },
+
     onAdd(evt: any) {
       viewer = evt.target;
-      if (!target) target = `${viewer.getMain().getNavigation().getId()}`;
+      if (!target) target = viewer.getMain().getNavigation().getId();
       oGlobeTarget = viewer.getId();
       map = viewer.getMap();
       featureInfo = viewer.getControlByName('featureInfo');
-      registerOptionalCleanup(helpers.timeSetter());
-      if (!oGlobe) {
-        oGlobe = new window.OLCesium({
-          map,
-          target: oGlobeTarget,
-          time() {
-            const value = (fp?.input as HTMLInputElement | undefined)?.value;
-            return Cesium.JulianDate.fromDate(value ? new Date(value) : new Date());
-          }
-        });
-      }
+
+      // Initialize time setter
+      registerOptionalCleanup(initTimeSetter());
+
+      // Create OLCesium
+      oGlobe = new window.OLCesium({
+        map,
+        target: oGlobeTarget,
+        time: () => {
+          const val = (fp?.input as HTMLInputElement)?.value;
+          return Cesium.JulianDate.fromDate(val ? new Date(val) : new Date());
+        },
+      });
+
       scene = oGlobe.getCesiumScene();
       window.oGlobe = oGlobe;
+
+      // Configure rendering
       scene.requestRenderMode = true;
       scene.maximumRenderTimeChange = Infinity;
-      const resolutionScaler = dynamicResolutionScaling(oGlobe, scene,{ forceLowEnd: false, forceHighEnd: false, debugLogs: true });
-      registerCleanup(() => resolutionScaler?.dispose?.());
 
+      // Dynamic resolution scaling
+      const scaler = dynamicResolutionScaling(oGlobe, scene, {
+        forceLowEnd: false,
+        forceHighEnd: false,
+        debugLogs: true,
+      });
+      registerCleanup(() => scaler?.dispose?.());
+
+      // Create tools
       polygonUi = createPolygonUi({
         scene,
         map,
@@ -581,237 +618,128 @@ const Globe = function Globe(options: GlobeOptions = {}) {
         requestSceneRender,
         registerCleanup,
         stopDomEvent,
+        drawToolOptions: config.drawToolConfig,
       });
-      registerCleanup(() => {
-        polygonUi?.destroy();
-        polygonUi = null;
-      });
+      registerCleanup(() => { polygonUi?.destroy(); polygonUi = null; });
 
+      measureUi = createMeasureUi({
+        scene,
+        map,
+        injectIntoMap,
+        requestSceneRender,
+        registerCleanup,
+        stopDomEvent,
+      });
+      measureUi.mountMeasureToolbarIfNeeded();
+      registerCleanup(() => { measureUi?.destroy(); measureUi = null; });
+
+      // Post-render patches
       const onPostRender = () => patchCollections(scene);
       scene.postRender.addEventListener(onPostRender);
       registerCleanup(() => scene.postRender.removeEventListener(onPostRender));
 
-      const handler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
-      cesiumHandler = handler;
+      // Event handler
+      cesiumHandler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
 
-      registerOptionalCleanup(helpers.addStreetView(streetView, handler, oGlobe));
-      helpers.addViewShed(viewShed, handler, viewshedButton);
-      registerOptionalCleanup(helpers.addControls());
-      helpers.showGlobeOption();
-      helpers.cesiumCredits();
-      helpers.addSvgIcons();
-      helpers.setActiveControls(oGlobe, viewer);
-      registerOptionalCleanup(helpers.pickedFeatureStyle(handler));
-      registerOptionalCleanup(helpers.addMeasureTool(scene));
+      // Add features
+      registerOptionalCleanup(addStreetView(cesiumHandler));
+      if (viewShed) {
+        const viewshedBtn = buttonManager.get(BUTTON_IDS.VIEWSHED)?.button;
+        if (viewshedBtn) {
+          ViewShed(scene, viewshedBtn, cesiumHandler);
+        }
+      }
+      registerOptionalCleanup(addCameraControls());
+      showGlobeOption();
+      cesiumCredits();
+      initializeSvgIcons(trackNode);
+      setActiveControls(oGlobe, viewer);
+      registerOptionalCleanup(addPickedFeatureStyle(cesiumHandler));
+      registerOptionalCleanup(addMeasureTool());
 
-      // If opened via a share URL, auto-enable 3D and load/zoom to polygons
+      // Load shared polygons from URL
       try {
         registerOptionalCleanup(polygonUi?.loadSharedPolygonsFromUrl());
-      } catch (e) {
-        // ignore
-      }
+      } catch { /* ignore */ }
 
+      // Camera controls
       CameraControls(scene);
-      getFeatureInfo(scene, viewer, map, featureInfo, helpers.flyTo);
 
+      // Feature info
+      getFeatureInfo(scene, viewer, map, featureInfo, flyTo);
+
+      // Scene configuration
       configureScene(scene, settings);
       configureGlobeAppearance(scene, settings);
-      loadTerrainProvider(scene, { cesiumTerrainProvider, cesiumIonassetIdTerrain, cesiumIontoken })
-        .catch((error) => console.error('Failed to load terrain provider', error));
-      load3DTiles(scene, map, cesiumIontoken);
-      loadGltfAssets(scene, gltf);
 
-      this.on('render', this.onRender as () => void);
-      this.addComponents(buttons);
+      // Load terrain and assets
+      loadTerrainProvider(scene, {
+        cesiumTerrainProvider: config.cesiumTerrainProvider,
+        cesiumIonassetIdTerrain: config.cesiumIonassetIdTerrain,
+        cesiumIontoken: config.cesiumIontoken,
+      }).catch((e: Error) => console.error('Terrain load failed', e));
+
+      load3DTiles(scene, map, config.cesiumIontoken);
+      loadGltfAssets(scene, config.gltf);
+
+      // Add components and render
+      const components = [...buttonManager.getOrigoButtons()];
+      if (quickTimeButton) {
+        components.push(quickTimeButton);
+      }
+      this.addComponents(components);
       this.render();
     },
-    onInit() {
-      globeEl = Origo.ui.Element({
-        tagName: 'div',
-        cls: 'flex column z-index-ontop-top-times20'
-      });
-      globeButton = Origo.ui.Button({
-        cls: 'o-globe padding-small margin-bottom-smaller icon-smaller round light box-shadow',
-        click() {
-          toggleGlobe();
-          toggleButtons();
-          helpers.setActiveControls(oGlobe, viewer);
-        },
-        icon: '#ic_cube_24px',
-        tooltipText: 'Slå på/av 3D-vy',
-        tooltipPlacement: 'east'
-      });
-      buttons.push(globeButton);
 
-      flatpickrButton = Origo.ui.Button({
-        cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow hidden',
-        click() {
-          if (!fp) return;
-          const toggleFlatpickrButtonEl = document.getElementById(flatpickrButton.getId());
-          if (toggleFlatpickrButtonEl) {
-            toggleFlatpickrButtonEl.classList.toggle('active');
-            toggleFlatpickrButtonEl.classList.contains('active') ? fp.open() : fp.close();
-          }
-        },
-        icon: '#ic_clock-time-four_24px',
-        tooltipText: 'Val av tid',
-        tooltipPlacement: 'east'
-      });
-      buttons.push(flatpickrButton);
-
-      if (viewShed) {
-        viewshedButton = Origo.ui.Button({
-          cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow',
-          click() {
-            if (!viewshedButton) return;
-            const el = document.getElementById(viewshedButton.getId());
-            if (el) {
-              el.classList.toggle('active');
-            }
-          },
-          icon: '#ic_visibility_24px',
-          tooltipText: 'Siktanalys',
-          tooltipPlacement: 'east'
-        });
-        buttons.push(viewshedButton);
-      }
-
-      if (drawTool) {
-        drawToolButton = Origo.ui.Button({
-          cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow',
-          click() {
-            if (!drawToolButton) return;
-            const el = document.getElementById(drawToolButton.getId());
-            if (el) {
-              const active = el.classList.toggle('active');
-              if (active) {
-                polygonUi?.mountPolygonToolbarIfNeeded();
-                polygonUi?.setPolygonToolbarVisible(true);
-              } else {
-                polygonUi?.setPolygonToolbarVisible(false);
-              }
-            }
-          },
-          icon: '#fa-pencil',
-          tooltipText: 'Ritverktyg',
-          tooltipPlacement: 'east'
-        });
-        buttons.push(drawToolButton);
-      }
-
-      if (quickTimeShadowPicker) {
-        const quickPicker = quickTimePicker(() => fp);
-        if (quickPicker) {
-          quickTimePickerButton = quickPicker.button;
-          if (quickTimePickerButton) {
-            buttons.push(quickTimePickerButton);
-          }
-          registerCleanup(quickPicker.dispose);
-        }
-      }
-
-      toggleShadowsButton = Origo.ui.Button({
-        cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow',
-        click() {
-          if (!scene) return;
-          const toggleShadowsButtonEl = document.getElementById(toggleShadowsButton.getId());
-          if (!toggleShadowsButtonEl || !scene.shadowMap) return;
-          toggleShadowsButtonEl.classList.toggle('active');
-          scene.shadowMap.enabled = toggleShadowsButtonEl.classList.contains('active');
-          requestSceneRender();
-        },
-        icon: '#ic_box-shadow_24px',
-        tooltipText: 'Slå på/av skuggor',
-        tooltipPlacement: 'east'
-      });
-      buttons.push(toggleShadowsButton);
-
-      if (fx) {
-        toggleFXButton = Origo.ui.Button({
-          cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow active',
-          click() {
-            if (!toggleFXButton || !scene) return;
-            const el = document.getElementById(toggleFXButton.getId());
-            let active = false;
-            if (el) {
-              active = el.classList.toggle('active');
-            }
-
-            const shadowMap = scene.shadowMap;
-            const shadowSettings = settings.shadows;
-            if (!shadowMap) return;
-            shadowMap.normalOffset = active && shadowSettings ? Boolean(shadowSettings.normalOffset) : false;
-            shadowMap.size = active && shadowSettings ? shadowSettings.size : 1024;
-            requestSceneRender();
-          },
-          icon: '#ic_cube_24px',
-          tooltipText: 'Toggle FX Settings',
-          tooltipPlacement: 'east'
-        });
-        buttons.push(toggleFXButton);
-      }
-    },
     render() {
-
-      const globeElDomTar = document.getElementById(target ?? '');
-      if (globeElDomTar) {
-        const globeMarkup = globeEl.render();
-        const globeNode = Origo.ui.dom.html(globeMarkup);
-        globeElDomTar.appendChild(globeNode);
+      // Render container
+      const targetEl = document.getElementById(target ?? '');
+      if (targetEl) {
+        const globeNode = Origo.ui.dom.html(globeEl.render());
+        targetEl.appendChild(globeNode);
       }
 
-      const globeElDom = document.getElementById(globeEl.getId());
-      if (globeElDom) {
-        const appendButton = (button?: OrigoButton | null) => {
-          if (!button) return;
-          const markup = button.render();
-          const node = Origo.ui.dom.html(markup);
-          globeElDom.appendChild(node);
-        };
+      // Render buttons
+      const container = document.getElementById(globeEl.getId());
+      if (container) {
+        buttonManager.renderInto(container);
 
-        appendButton(globeButton);
-        appendButton(flatpickrButton);
-
-        if (quickTimeShadowPicker) {
-          appendButton(quickTimePickerButton);
-        }
-
-        if (drawTool) {
-          appendButton(drawToolButton);
-        }
-
-        if (viewShed) {
-          appendButton(viewshedButton);
-        }
-
-        appendButton(toggleShadowsButton);
-
-        if (fx) {
-          appendButton(toggleFXButton);
+        // Insert quickTime button before flatpickr button (so it appears above)
+        if (quickTimeButton) {
+          const node = Origo.ui.dom.html(quickTimeButton.render());
+          const flatpickrBtn = buttonManager.get(BUTTON_IDS.FLATPICKR);
+          const flatpickrEl = flatpickrBtn?.getElement();
+          if (flatpickrEl) {
+            flatpickrEl.parentNode?.insertBefore(node, flatpickrEl);
+          } else {
+            container.appendChild(node);
+          }
         }
       }
 
-      helpers.activeGlobeOnStart();
+      activeGlobeOnStart();
       this.dispatch('render');
-
     },
+
     onRemove() {
-      // disable 3D first (releases some things in olcs)
-      try { oGlobe?.setEnabled(false); } catch (error) {
-        console.warn('Failed to disable globe on remove', error);
+      try { oGlobe?.setEnabled(false); } catch (e) {
+        console.warn('Failed to disable globe', e);
       }
 
       flushCleanups();
-      cleanupCesiumHandlers();
+      cesiumHandler?.destroy();
+      cesiumHandler = undefined;
       cleanupDom();
+      buttonManager.clear();
       hasActivatedOnStart = false;
     },
-    isGlobeActive: (): boolean => isGlobeActive(oGlobe),
+
+    // Public API
+    isGlobeActive: () => isGlobeActive(oGlobe),
     threedtiletype: () => threedtile,
     gltftype: () => addGLTF,
     globalOLCesium: () => OLCesium,
   });
 };
-
 
 export default Globe;

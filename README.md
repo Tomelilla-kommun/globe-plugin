@@ -7,8 +7,6 @@ A plugin for [Origo map](https://github.com/origo-map/origo) to enable a [Cesium
 
 See [index_example.html](https://github.com/haninge-geodata/origo-globe-plugin/blob/main/index_example.html) and [index_example.json](https://github.com/haninge-geodata/origo-globe-plugin/blob/main/index_example.json) to get started with configuration.
 
-Origo Globe plugin only works with reference system EPSG:3857. Make sure that `index.json` is set to use EPSG:3857.
-
 Copy the files in the `build` folder and place them in Origo's `plugins/globe` folder.
 
 ℹ️ Due to loading issues, ol-cesium needs to be loaded from Origo-map.
@@ -24,18 +22,151 @@ import OLCesium from 'olcs/OLCesium';
 
 window.OLCesium = OLCesium;
 ```
+s
+## Configuration
 
-and add this at thebottom of the file:
+All globe settings can be configured in `index.json` under the `"3D"` section. This keeps all 3D-related configuration in one place.
 
-```
-Origo.layerType = layerType;
+### Full configuration example
+
+```json
+{
+  "3D": {
+    "showGlobe": true,
+    "globeOnStart": true,
+    "viewShed": true,
+    "streetView": true,
+    "streetViewMap": "webservices:topowebbkartan",
+    "fx": false,
+    "drawTool": {
+      "active": true,
+      "options": {
+        "export": {
+          "geojson": true,
+          "dxf": true,
+          "dxfCrs": ["EPSG:3008", "EPSG:4326"]
+        },
+        "share": true,
+        "defaultColor": "white",
+        "defaultHeight": 10
+      }
+    },
+    "cameraControls": true,
+    "measure": true,
+    "quickTimeShadowPicker": true,
+    "flyTo": false,
+    "deactivateControls": [],
+    "settings": {
+      "depthTestAgainstTerrain": true,
+      "enableAtmosphere": true,
+      "enableGroundAtmosphere": true,
+      "enableFog": false,
+      "enableLighting": true,
+      "shadows": {
+        "darkness": 0.3,
+        "fadingEnabled": true,
+        "maximumDistance": 1000,
+        "normalOffset": true,
+        "size": 4096,
+        "softShadows": false
+      },
+      "skyBox": {
+        "url": "plugins/globe/cesiumassets/Assets/Textures/SkyBox/",
+        "images": {
+          "pX": "tycho2t3_80_px.jpg",
+          "nX": "tycho2t3_80_mx.jpg",
+          "pY": "tycho2t3_80_py.jpg",
+          "nY": "tycho2t3_80_my.jpg",
+          "pZ": "tycho2t3_80_pz.jpg",
+          "nZ": "tycho2t3_80_mz.jpg"
+        }
+      }
+    },
+    "cesiumIontoken": "your-cesium-ion-token",
+    "cesiumTerrainProvider": "data/TerrainOptimized17/"
+  }
+}
 ```
 
-before this:
+### Configuration options
 
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `showGlobe` | boolean | `true` | Show/hide the globe |
+| `globeOnStart` | boolean | `false` | Automatically enable 3D mode on load |
+| `viewShed` | boolean | `false` | Enable viewshed analysis tool |
+| `streetView` | boolean | `false` | Enable street-level view mode |
+| `streetViewMap` | string | `""` | Layer name to use as ground texture in street view |
+| `cameraControls` | boolean | `false` | Show camera tilt/rotate buttons |
+| `measure` | boolean | `false` | Enable 3D measurement tools |
+| `quickTimeShadowPicker` | boolean | `false` | Enable quick time/date picker for shadows |
+| `flyTo` | boolean | `false` | Animate camera when selecting objects |
+| `fx` | boolean | `false` | Enable extra visual effects |
+| `drawTool` | object/boolean | `false` | Drawing tool configuration (see below) |
+| `deactivateControls` | string[] | `[]` | List of Origo controls to hide when 3D is active |
+| `cesiumIontoken` | string | - | Your Cesium Ion access token |
+| `cesiumTerrainProvider` | string | - | Path to custom terrain tiles |
+
+### Draw tool options
+
+```json
+"drawTool": {
+  "active": true,
+  "options": {
+    "export": {
+      "geojson": true,
+      "dxf": true,
+      "dxfCrs": ["EPSG:3008", "EPSG:4326"]
+    },
+    "share": true,
+    "defaultColor": "white",
+    "defaultHeight": 10
+  }
+}
 ```
-export default Origo;
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `export.geojson` | boolean | `true` | Enable GeoJSON export |
+| `export.dxf` | boolean | `true` | Enable DXF export |
+| `export.dxfCrs` | string[] | `["EPSG:3006"]` | Coordinate systems for DXF export (see table below) |
+| `share` | boolean | `true` | Enable share URL feature |
+
+#### Available DXF coordinate systems (SWEREF99)
+
+| EPSG Code | Name | Description |
+|-----------|------|-------------|
+| `EPSG:3006` | SWEREF99 TM | National system (default) |
+| `EPSG:3007` | SWEREF99 12 00 | Local zone 12°00' |
+| `EPSG:3008` | SWEREF99 13 30 | Local zone 13°30' |
+| `EPSG:3009` | SWEREF99 15 00 | Local zone 15°00' |
+| `EPSG:3010` | SWEREF99 16 30 | Local zone 16°30' |
+| `EPSG:3011` | SWEREF99 18 00 | Local zone 18°00' |
+| `EPSG:3012` | SWEREF99 14 15 | Local zone 14°15' |
+| `EPSG:3013` | SWEREF99 15 45 | Local zone 15°45' |
+| `EPSG:3014` | SWEREF99 17 15 | Local zone 17°15' |
+| `EPSG:3015` | SWEREF99 18 45 | Local zone 18°45' |
+| `EPSG:3016` | SWEREF99 20 15 | Local zone 20°15' |
+| `EPSG:3017` | SWEREF99 21 45 | Local zone 21°45' |
+| `EPSG:3018` | SWEREF99 23 15 | Local zone 23°15' |
+| `defaultColor` | string | `"white"` | Default polygon color (white, red, green, blue, yellow, cyan) |
+| `defaultHeight` | number | `10` | Default extrusion height in meters |
+
+### Minimal configuration in index.html
+
+With the new configuration system, `index.html` only needs:
+
+```js
+origo.on('load', async (viewer) => {
+  const indexJson = await fetch('index.json').then(r => r.json());
+  const globe = Globe({
+    indexJson: indexJson,
+  });
+  viewer.addComponent(globe);
+});
 ```
+
+Settings can still be passed directly to `Globe({...})` to override values from `index.json`.
 
 
 ## Layer configuration
@@ -44,17 +175,19 @@ To add 3D layers to the viewer, please see `index_example.json`.
 
 ### Custom terrain tiles
 
-To add a custom terrain provider that points to a local terrain tile folder, specify it in your `index.html` configuration:
+To add a custom terrain provider, specify it in your `index.json` under the `"3D"` section:
 
-```js
-    cesiumTerrainProvider: 'path/to/your/terrain',
+```json
+"3D": {
+  "cesiumTerrainProvider": "path/to/your/terrain"
+}
 ```
 
 ### Custom 3D-tile layer
 
 Within `index.json`, add your custom 3D-tile layer as shown below:
 
-```js
+```json
 {
     "name": "Byggnader",
     "title": "Byggnader",
@@ -73,7 +206,7 @@ Changing `style` will affect the appearance of the 3D layer.
 
 To add glb/gltf models, use the example below. Several models can be added inside the array "models".
 
-```js
+```json
 {
     "name": "GLB",
     "title": "GLB",
@@ -90,8 +223,7 @@ To add glb/gltf models, use the example below. Several models can be added insid
             "heightReference": "NONE",
             "rotHeading": 0,
             "animation": false
-        },
-        ...
+        }
     ]
 }
 ```
@@ -107,7 +239,7 @@ Inside the `extrusion` attribute, assign the attribute values to `groundAttr` (h
 
 (Only tested with GeoServer)
 
-```js
+```json
 {
     "name": "geostore:Byggnader",
     "title": "Byggnader2D",
@@ -127,21 +259,10 @@ Inside the `extrusion` attribute, assign the attribute values to `groundAttr` (h
 ```
 Changing `color`, `opacity`, `outline`, and `outlineColor` will affect the appearance of the layer.
 
+
 ## Functions
 
-All functions described in this section can be enabled or disabled in the `Globe` configuration (see below) within `index.html`:
-
-```js
-const globe = Globe({
-    viewShed: true,
-    streetView: true,
-    cameraControls: true,
-    measure: true,
-    quickTimeShadowPicker: true,
-    flyTo: false,
-    // ...
-});
-```
+All functions described in this section can be enabled or disabled in `index.json` under the `"3D"` section.
 
 ### ViewShed
 
@@ -151,6 +272,7 @@ To use this function:
 1. Activate the ViewShed tool.
 2. Select the origin point for the analysis.
 3. Select the endpoint to define the direction and extent of the viewshed.
+4. Drag the blue start point to adjust the viewshed position.
 
 <img src="data/viewShed.png" alt="ViewShed" title="ViewShed" height="300px" />
 
@@ -176,16 +298,88 @@ With these controls, the user can tilt and rotate the camera using buttons.
 
 ### Measure
 
-The Measure tool can measure between 3D objects and also between terrain and 3D objects.
+The 3D Measure tool provides four measurement modes:
+
+| Mode | Description |
+|------|-------------|
+| **Distance** | Measure 3D distance between two points on terrain or 3D objects |
+| **Height** | Measure vertical height difference between two points |
+| **Footprint** | Measure horizontal projected area (like looking straight down) - useful for land plots and building footprints |
+| **3D Surface** | Measure true 3D surface area - useful for roofs, walls, slopes, and terrain |
+
+To use:
+1. Select measurement mode from the toolbar.
+2. For distance/height: click two points on the map.
+3. For footprint/surface area: click multiple points to define the polygon, then right-click to complete.
+4. Use the clear button to remove all measurements.
 
 <img src="data/measure.png" alt="Measure" title="Measure" height="340px" />
 
 ### QuickTimeShadowPicker
 
-Enables quick access to dates and times of equinoxes and solstices.
+Enables quick access to dates and times of equinoxes and solstices for shadow analysis.
 
 <img src="data/quickTimeShadowPicker.png" alt="QuickTimeShadowPicker" title="QuickTimeShadowPicker" height="340px" />
 
 ### FlyTo
 
 If activated, FlyTo will animate the camera to pan and zoom to focus on the selected object.
+
+### Draw
+
+The Draw tool allows you to create 3D extruded polygons and rectangles on the map. By activating draw, you get a toolbar at the bottom of the screen.
+
+#### Drawing tools
+
+| Tool | Description |
+|------|-------------|
+| **Polygon** | Draw freeform polygons by clicking corners. Right-click to finish. |
+| **Rectangle** | Draw rectangles by clicking two opposite corners. |
+
+#### Toolbar buttons
+
+| Button | Description |
+|--------|-------------|
+| Height | Set the extrusion height (in meters) for new polygons |
+| Color | Choose fill color (white, red, green, blue, yellow, cyan) |
+| Opacity | Toggle between transparent (70%) and opaque (100%) |
+| Clear | Remove all drawn polygons |
+| Labels | Toggle polygon information labels on/off |
+| Share | Copy a shareable URL to clipboard containing all drawn polygons |
+| Download | Export polygons as GeoJSON or DXF (with configurable coordinate systems) |
+
+#### Editing individual polygons
+
+Click on any drawn polygon to select it. A secondary toolbar appears with editing options:
+
+| Option | Description |
+|--------|-------------|
+| Name | Edit the polygon's name |
+| Height | Change the extrusion height |
+| Color | Change the fill color |
+| Opacity | Toggle transparency |
+| Delete | Remove this polygon |
+| Deselect | Close the edit panel |
+
+The polygon outline turns yellow when selected.
+
+#### Polygon labels
+
+Each polygon displays information including:
+- Name
+- Base height (terrain level)
+- Extrusion height
+- Top elevation (base + extrusion)
+- Area in m²
+
+#### Export formats
+
+- **GeoJSON 2D (EPSG:4326)**: Standard GeoJSON with 2D coordinates. Properties include extrudeHeight, baseHeight, area, color, and fillAlpha for 3D reconstruction.
+- **DXF 3D**: AutoCAD-compatible format with full 3D geometry, supports multiple coordinate systems (SWEREF99 zones)
+
+#### Sharing
+
+The share button creates a URL containing all drawn polygons. When someone opens the link:
+- 3D mode activates automatically
+- All shared polygons are loaded and displayed
+- The view zooms to fit all polygons

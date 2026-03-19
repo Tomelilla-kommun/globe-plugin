@@ -74,7 +74,7 @@ function getCenterFromCamera(camera: Cesium.Camera) {
   return fromLonLat([lon, lat]); // EPSG:3857
 }
 
-export function createMiniMap(globe: Globe, containerDiv: HTMLDivElement) {
+export function createMiniMap(globe: Globe, containerDiv: HTMLDivElement, name:string) {
   const mainView = globe.getOlView();
   const scene = globe.getCesiumScene();
   const camera = scene.camera;
@@ -85,26 +85,26 @@ export function createMiniMap(globe: Globe, containerDiv: HTMLDivElement) {
     projection: mainView.getProjection(),
     rotation: 0,
   });
-
   
-// https://kartor.tomelilla.se/geoserver/webservices/wms?REQUEST=GetMap&SERVICE=WMS&VERSION=1.1.1&FORMAT=image%2Fpng&STYLES=&TRANSPARENT=true&LAYERS=webservices%3Atopowebbkartan&TILED=true&WIDTH=256&HEIGHT=256&SRS=EPSG%3A3008&BBOX=169827.1250
+  const foundLayer = globe.getOlMap().getLayers().getArray().find((tile) => tile.get('id') === name);
+
+  // Use duck typing instead of instanceof (avoids issues with multiple OL bundles)
+  let clonedLayer: TileLayer<any> | undefined;
+  if (foundLayer && typeof (foundLayer as any).getSource === 'function') {
+    const source = (foundLayer as any).getSource();
+    if (source) {
+      clonedLayer = new TileLayer({
+        source: source,
+        visible: true, 
+      });
+    }
+  }
+
+  console.log(clonedLayer)
+  
   const miniMap = new Map({
     target: undefined,
-    layers: [
-        new TileLayer({
-            source: new TileWMS({
-            url: 'https://kartor.tomelilla.se/geoserver/webservices/ows',
-            params: {
-                LAYERS: 'webservices:topowebbkartan',
-                FORMAT: 'image/jpeg',
-                // TRANSPARENT: false,
-                VERSION: '1.1.1',
-            },
-            serverType: 'geoserver',
-            crossOrigin: 'anonymous',
-            })
-        })
-    ],
+    layers: clonedLayer ? [clonedLayer] : [],
     view: miniView,
     controls: [],
         interactions: defaultInteractions({ 

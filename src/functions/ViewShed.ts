@@ -67,6 +67,9 @@ export default function setupViewshed(
     handler.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_UP);
     document.removeEventListener('click', handleMapClick, true);
 
+    // Request render to update scene after removing viewshed
+    scene.requestRender();
+
     alert('Viewshed-läge avstängt.');
   }
 
@@ -116,6 +119,14 @@ export default function setupViewshed(
     });
 
     initDragHandlers();
+
+    // Request multiple renders to ensure shadow map is fully initialized
+    scene.requestRender();
+    requestAnimationFrame(() => {
+      scene.requestRender();
+      // Second frame to ensure post-process is enabled after shadow texture exists
+      requestAnimationFrame(() => scene.requestRender());
+    });
   }
 
   /** Enables drag interactions for adjusting the start point */
@@ -142,16 +153,21 @@ export default function setupViewshed(
 
     handler.setInputAction((movement: DragMovement) => {
       if (!pickedEntity) return;
-      const newCartesian: Cesium.Cartesian3 | undefined = scene.camera.pickEllipsoid(movement.endPosition, scene.globe.ellipsoid);
+      
+      // Use pickPosition to get position on terrain/3D tiles, not ellipsoid
+      const newCartesian: Cesium.Cartesian3 | undefined = scene.pickPosition(movement.endPosition);
       if (!newCartesian) return;
 
+      // Preserve the original height offset (camera height above terrain)
       const newCarto: Cesium.Cartographic = Cesium.Cartographic.fromCartesian(newCartesian);
-      const originalCarto: Cesium.Cartographic = Cesium.Cartographic.fromCartesian(pickedEntity.position);
-      newCarto.height = originalCarto.height;
+      newCarto.height += getCameraHeight();
 
-      const updatedPos: Cesium.Cartesian3 = Cesium.Cartographic.toCartesian(newCarto);
+      const updatedPos: Cesium.Cartesian3 = Cesium.Cartesian3.fromRadians(newCarto.longitude, newCarto.latitude, newCarto.height);
       pickedEntity.position = updatedPos;
       (sensorShadowInstance as SensorShadow).cameraPosition = new Cesium.ConstantPositionProperty(updatedPos);
+
+      // Request render to show updated position during drag
+      scene.requestRender();
     }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
     // End drag

@@ -31,6 +31,21 @@ export default function quickTimePicker(resolvePicker: () => any): { button: any
   document.body.appendChild(container);
   // trackNodeFn(container);
 
+  // Track selected button
+  let selectedBtn: HTMLButtonElement | null = null;
+  
+  const setSelectedStyle = (btn: HTMLButtonElement) => {
+    btn.style.background = '#1a73e8';
+    btn.style.borderColor = '#1a73e8';
+    btn.style.color = '#fff';
+  };
+  
+  const clearSelectedStyle = (btn: HTMLButtonElement) => {
+    btn.style.background = 'transparent';
+    btn.style.borderColor = '#e9e9e9';
+    btn.style.color = '#404848';
+  };
+
   QUICK_TIME_PRESETS.forEach(({ date, label }) => {
     const header = document.createElement('div');
     header.textContent = label;
@@ -65,12 +80,16 @@ export default function quickTimePicker(resolvePicker: () => any): { button: any
 
       btn.classList.add('quick-time-button', 'small');
       btn.onmouseenter = () => {
-        btn.style.background = '#e9e9e9';
-        btn.style.borderColor = '#e9e9e9';
+        if (btn !== selectedBtn) {
+          btn.style.background = '#e9e9e9';
+          btn.style.borderColor = '#e9e9e9';
+        }
       };
       btn.onmouseleave = () => {
-        btn.style.background = 'transparent';
-        btn.style.borderColor = '#e9e9e9';
+        if (btn !== selectedBtn) {
+          btn.style.background = 'transparent';
+          btn.style.borderColor = '#e9e9e9';
+        }
       };
       btn.onclick = () => {
         const resolvedPicker = resolvePicker();
@@ -80,6 +99,16 @@ export default function quickTimePicker(resolvePicker: () => any): { button: any
           console.warn('Quick time picker could not update the flatpickr instance.');
           return;
         }
+        
+        // Clear previous selection
+        if (selectedBtn) {
+          clearSelectedStyle(selectedBtn);
+        }
+        
+        // Set new selection
+        selectedBtn = btn;
+        setSelectedStyle(btn);
+        
         const d = new Date(date);
         d.setHours(hour, 0, 0);
         pickerInstance.setDate(d, true);
@@ -97,24 +126,40 @@ export default function quickTimePicker(resolvePicker: () => any): { button: any
     click() {
       const isVisible = container.style.display === 'block';
       container.style.display = isVisible ? 'none' : 'block';
-
-      if (!isVisible) {
-        const btnEl = document.getElementById(button.getId());
-        if (btnEl) {
+      
+      // Toggle active state for visual feedback
+      const btnEl = document.getElementById(button.getId());
+      if (btnEl) {
+        btnEl.classList.toggle('active', !isVisible);
+        
+        if (!isVisible) {
           const rect = btnEl.getBoundingClientRect();
           container.style.left = `${rect.right + 10}px`;
           container.style.top = `${rect.top}px`;
         }
       }
     },
-    icon: '#ic_clock-time-four_24px',
+    icon: '#ic_flash_24px',
     tooltipText: 'Snabbval för tid',
     tooltipPlacement: 'east'
   });
 
+  // Close popover and deactivate button when clicking outside
+  const onDocumentClick = (e: MouseEvent) => {
+    const btnEl = document.getElementById(button.getId());
+    if (!container.contains(e.target as Node) && e.target !== btnEl && !btnEl?.contains(e.target as Node)) {
+      container.style.display = 'none';
+      btnEl?.classList.remove('active');
+    }
+  };
+  document.addEventListener('click', onDocumentClick);
+
   return {
     button,
     container,
-    dispose: () => container.remove()
+    dispose: () => {
+      document.removeEventListener('click', onDocumentClick);
+      container.remove();
+    }
   };
 };

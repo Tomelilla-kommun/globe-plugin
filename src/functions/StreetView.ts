@@ -32,7 +32,8 @@ const moveFlags = Object.fromEntries(
 export default async function setupStreetMode(
   scene: Cesium.Scene,
   handler: Cesium.ScreenSpaceEventHandler,
-  globe: any
+  globe: any,
+  name: string
 ): Promise<void> {
   const heightPanel = document.getElementById('height-controls') as HTMLDivElement | null;
   const streetBtn = document.getElementById('street-mode-toggle') as HTMLButtonElement | null;
@@ -53,10 +54,29 @@ export default async function setupStreetMode(
   };
 
   /** Adjusts camera height value */
+  /** Keeps camera height above terrain */
+  const adjustCameraHeight = () => {
+    if (isCameraAnimating) return;
+    const carto = Cesium.Cartographic.fromCartesian(scene.camera.position);
+    const groundHeight = scene.globe.getHeight(carto);
+    if (groundHeight == null) return;
+
+    const desiredHeight = groundHeight + getCameraHeight();
+    if (Math.abs(carto.height - desiredHeight) > 0.01) {
+      carto.height = desiredHeight;
+      scene.camera.position = Cesium.Cartesian3.fromRadians(
+        carto.longitude, carto.latitude, desiredHeight
+      );
+    }
+  };
+
   const adjustHeight = (delta: number) => {
     const newHeight = Math.max(1, Math.min(getCameraHeight() + delta, 9999));
     setCameraHeight(newHeight);
     updateHeightDisplay();
+    if (getIsStreetMode()) {
+      adjustCameraHeight();
+    }
   };
 
   heightUp?.addEventListener('click', () => adjustHeight(+0.05));
@@ -75,22 +95,6 @@ export default async function setupStreetMode(
     });
   };
 
-  /** Keeps camera height above terrain */
-  const adjustCameraHeight = () => {
-    if (isCameraAnimating) return;
-    const carto = Cesium.Cartographic.fromCartesian(scene.camera.position);
-    const groundHeight = scene.globe.getHeight(carto);
-    if (groundHeight == null) return;
-
-    const desiredHeight = groundHeight + getCameraHeight();
-    if (Math.abs(carto.height - desiredHeight) > 0.01) {
-      carto.height = desiredHeight;
-      scene.camera.position = Cesium.Cartesian3.fromRadians(
-        carto.longitude, carto.latitude, desiredHeight
-      );
-    }
-  };
-
   /** Smooth camera flyTo helper */
   const flyToCarto = (
     carto: Cesium.Cartographic,
@@ -107,6 +111,10 @@ export default async function setupStreetMode(
 
   /** Keyboard handlers */
   const streetKeyDown = (e: KeyboardEvent) => {
+    if (e.code === 'Escape') {
+      exitStreetMode();
+      return;
+    }
     const key = MOVE_KEYS[e.code as keyof typeof MOVE_KEYS];
     if (key) moveFlags[key] = true;
   };
@@ -118,8 +126,11 @@ export default async function setupStreetMode(
 
   /** Start street mode at a given position */
   const enterStreetMode = (position: Cesium.Cartesian3) => {
-    miniMapController = createMiniMap(globe, bottomrightDiv);
+    miniMapController = createMiniMap(globe, bottomrightDiv, name);
     miniMapController.mount();
+    
+    // Toggle active state on button
+    streetBtn?.classList.add('active');
     
     const carto = Cesium.Cartographic.fromCartesian(position);
     carto.height += getCameraHeight();
@@ -216,6 +227,9 @@ export default async function setupStreetMode(
     setControllerState(false);
     setIsStreetMode(false);
     toggleDisplay(heightPanel);
+    
+    // Remove active state from button
+    streetBtn?.classList.remove('active');
 
     scene.camera.flyTo({
       destination: Cesium.Cartesian3.fromRadians(carto.longitude, carto.latitude, carto.height),

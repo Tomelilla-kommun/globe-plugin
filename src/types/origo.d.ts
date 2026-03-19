@@ -22,6 +22,9 @@ declare module 'Origo' {
   /** Origo main interface */
   const Origo: {
     ui: OrigoUI;
+    controls: {
+      [key: string]: any;
+    };
     ol: {
       layer: {
         Layer: typeof Layer;

@@ -47,21 +47,30 @@ export async function loadTrees(
   }
 
 
-  if (cartos.length) {
-    await sampleTerrainMostDetailed(scene.terrainProvider, cartos);
-    for (let i = 0; i < metas.length; i++) {
-      metas[i].height = cartos[i].height || 0;
-    }
-  }
-
+  const TERRAIN_CHUNK_SIZE = 50;
   const scheduler = new TreeLoadScheduler(scene);
   layer.treeScheduler = scheduler;
 
-    // for (const meta of metas) {
-    //   scheduler.addTree(meta);
-    // }
+  if (cartos.length) {
+    // Process in chunks so the scheduler can start loading trees from the first
+    // chunk while terrain data for later chunks is still being fetched.
+    for (let chunkStart = 0; chunkStart < metas.length; chunkStart += TERRAIN_CHUNK_SIZE) {
+      const chunkEnd = Math.min(chunkStart + TERRAIN_CHUNK_SIZE, metas.length);
+      const chunkCartos = cartos.slice(chunkStart, chunkEnd);
+      const chunkMetas = metas.slice(chunkStart, chunkEnd);
 
-  scheduler.addTrees(metas);
-  scheduler.start();
+      await sampleTerrainMostDetailed(scene.terrainProvider, chunkCartos);
+
+      for (let j = 0; j < chunkMetas.length; j++) {
+        chunkMetas[j].height = chunkCartos[j].height || 0;
+      }
+
+      scheduler.addTrees(chunkMetas);
+      // Start the scheduler on the first chunk so loading begins immediately.
+      if (chunkStart === 0) scheduler.start();
+    }
+  } else {
+    scheduler.start();
+  }
 
 }

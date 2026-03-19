@@ -16,28 +16,25 @@ import {
   PolygonGeometry,
   PolygonHierarchy,
   ColorGeometryInstanceAttribute,
-  PerInstanceColorAppearance
+  PerInstanceColorAppearance,
+  ClippingPolygonCollection,
+  Cartographic
 } from 'cesium';
 import GeoJSON from 'ol/format/GeoJSON';
-import Map from 'ol/Map';
+import OLMap from 'ol/Map';
 import { loadTrees } from '../functions/loadTrees';
+import {
+  MaskConfig,
+  ModelDefinition,
+  ThreedTileLayer as BaseThreedTileLayer,
+  applyMask
+} from '../functions/tileClipping';
 
 interface ExtrusionConfig {
   color?: string;
   opacity?: number;
   groundAttr: string;
   roofAttr: string;
-}
-
-interface ModelDefinition {
-  fileName: string;
-  lat: number;
-  lng: number;
-  height?: number;
-  heightReference?: string;
-  rotHeading?: number;
-  rotPitch?: number;
-  rotRoll?: number;
 }
 
 interface LayerOptions {
@@ -52,15 +49,14 @@ interface LayerOptions {
   outlineColor?: string;
   style?: Record<string, unknown> | 'default';
   filter?: boolean;
+  /** Mask config: { tilesetName: buffer } or { tilesetName: { buffer, removeIntersecting } } */
+  mask?: Record<string, number | MaskConfig>;
   CesiumModels?: Model[];
   CesiumExtrusions?: Primitive[];
   [key: string]: unknown;
 }
 
-type ThreedTileLayer = LayerOptions & {
-  get: <T = unknown>(key: string) => T;
-  CesiumTileset?: Cesium3DTileset;
-  CesiumModels?: Model[];
+type ThreedTileLayer = LayerOptions & BaseThreedTileLayer & {
   CesiumExtrusions?: Primitive[];
   on?: (type: string, listener: () => void) => void;
 };
@@ -72,21 +68,58 @@ const PRIMITIVE_BATCH_SIZE = 100;
 
 export default async function load3DLayers(
   scene: Scene,
-  map: Map,
+  map: OLMap,
   cesiumIontoken: string
 ): Promise<void> {
   const layers = map.getLayers().getArray() as unknown as ThreedTileLayer[];
 
   const threedLayers = layers.filter((layer) => layer.get('type') === 'THREEDTILE');
+  // Force-init ALL layers (including those configured as invisible) so every
+  // CesiumTileset / CesiumModels reference is populated before mask application.
   await runWithConcurrency(
     threedLayers.map(
-      (layer) => () => ensureLayerInitialized(scene, layer, cesiumIontoken)
+      (layer) => () => ensureLayerInitialized(scene, layer, cesiumIontoken, true)
     ),
     MAX_CONCURRENT_LOADS
   );
+
+  // Second pass: apply masks after the next render. Temporarily show all tilesets
+  // so their GPU state is ready when clippingPolygons is assigned, then revert.
+  scene.postRender.addEventListener(function applyMasksOnce() {
+    scene.postRender.removeEventListener(applyMasksOnce);
+
+    // Collect tilesets that are currently hidden and force them visible.
+    const hiddenTilesets: Cesium3DTileset[] = [];
+    threedLayers.forEach((layer) => {
+      if (layer.CesiumTileset && !layer.CesiumTileset.show) {
+        hiddenTilesets.push(layer.CesiumTileset);
+        layer.CesiumTileset.show = true;
+      }
+    });
+
+    // Apply masks asynchronously (handles GeoJSON loading)
+    void Promise.all(
+      threedLayers.map((layer) => applyMask(scene, layer, threedLayers, bufferPositions))
+    ).then(() => {
+      // Revert tilesets that were invisible before.
+      hiddenTilesets.forEach((t) => { t.show = false; });
+    });
+  });
+
   threedLayers.forEach((layer) =>
     layer.on?.('change:visible', () => {
-      void ensureLayerInitialized(scene, layer, cesiumIontoken);
+      void ensureLayerInitialized(scene, layer, cesiumIontoken).then(() => {
+        // Re-apply masks in case this layer is a tileset that was invisible when
+        // applyMask first ran — its CesiumTileset won't have been set yet then.
+        const layerName = layer.get('name') as string;
+        const modelLayers = threedLayers.filter((l) => {
+          const m = l.get('mask');
+          return m !== null && typeof m === 'object' && layerName in (m as object);
+        });
+        void Promise.all(
+          modelLayers.map((modelLayer) => applyMask(scene, modelLayer, threedLayers, bufferPositions))
+        );
+      });
     })
   );
 }
@@ -94,9 +127,10 @@ export default async function load3DLayers(
 async function ensureLayerInitialized(
   scene: Scene,
   layer: ThreedTileLayer,
-  cesiumIontoken: string
+  cesiumIontoken: string,
+  forceInit = false
 ) {
-  if (!layer.get('visible')) {
+  if (!forceInit && !layer.get('visible')) {
     return;
   }
 
@@ -115,10 +149,10 @@ async function ensureLayerInitialized(
     return;
   }
 
-  if (layer.get('model')) {
-    await loadTrees(layer, scene, layer.get('model'));
-    return;
-  }
+  // if (layer.get('model')) {
+  //   await loadTrees(layer, scene, layer.get('model'));
+  //   return;
+  // }
 
   await loadTilesetLayer(scene, layer, cesiumIontoken);
 }
@@ -178,8 +212,11 @@ async function loadModelLayer(scene: Scene, layer: ThreedTileLayer) {
   }
 
   const visible = Boolean(layer.get('visible'));
-  const primitives = await Promise.all(
-    modelDefs.map((definition) =>
+
+  // Load models with bounded concurrency to avoid spiking memory and stalling
+  // the render loop when many models are defined on a single layer.
+  const primitives = await runWithConcurrency(
+    modelDefs.map((definition) => () =>
       Model.fromGltfAsync({
         url: `${baseUrl}${definition.fileName}`,
         modelMatrix: createModelMatrix(definition),
@@ -187,15 +224,26 @@ async function loadModelLayer(scene: Scene, layer: ThreedTileLayer) {
         asynchronous: true,
         heightReference: resolveHeightReference(definition.heightReference)
       })
-    )
+    ),
+    MAX_CONCURRENT_LOADS
   );
 
-  primitives.forEach((primitive) => {
-    primitive.show = visible;
-  });
+  // Force show=true so Cesium's render loop processes the model and fires readyEvent
+  // regardless of the layer's configured visibility.
+  primitives.forEach((p) => { p.show = true; });
   await insertPrimitivesInBatches(scene, primitives);
 
+  // Wait for every model to be GPU-ready before accessing boundingSphere / _loader.
+  await Promise.all(primitives.map(waitForModelReady));
+
+  // Revert to configured visibility now that footprints have been extracted.
+  primitives.forEach((p) => { p.show = visible; });
+
   layer.CesiumModels = [...(layer.CesiumModels ?? []), ...primitives];
+
+  // Extract convex-hull footprints from ready Model primitives for use in applyMask.
+  const footprints = primitives.map((prim) => extractFootprintFromModel(prim));
+  layer.CesiumModelFootprints = [...(layer.CesiumModelFootprints ?? []), ...footprints];
 }
 
 async function loadTilesetLayer(
@@ -224,6 +272,7 @@ async function loadTilesetLayer(
       });
     } else if (typeof url === 'string') {
       tileset = await Cesium3DTileset.fromUrl(url, {
+        instanceFeatureIdLabel: layer.get('name'),
         dynamicScreenSpaceError: true,
         shadows:
           layer.get('showShadows') === false
@@ -259,19 +308,25 @@ function resolveColor(colorName?: string, opacity = 1): Color {
   return (namedColors[upperCase] || Color.LIGHTGRAY).withAlpha(opacity);
 }
 
+interface OlGeometryLike {
+  getType(): string;
+  getCoordinates(): unknown;
+}
+
 function getPolygonCoordinates(
   geometry: unknown
 ): [number, number][] | undefined {
-  if (!geometry || typeof (geometry as any).getType !== 'function') {
+  if (!geometry || typeof (geometry as OlGeometryLike).getType !== 'function') {
     return undefined;
   }
 
-  const type = (geometry as any).getType();
+  const g = geometry as OlGeometryLike;
+  const type = g.getType();
   if (type === 'Polygon') {
-    return (geometry as any).getCoordinates()?.[0];
+    return (g.getCoordinates() as [number, number][][])?.[0];
   }
   if (type === 'MultiPolygon') {
-    return (geometry as any).getCoordinates()?.[0]?.[0];
+    return (g.getCoordinates() as [number, number][][][])?.[0]?.[0];
   }
   return undefined;
 }
@@ -315,7 +370,7 @@ function createExtrusionPrimitive(
   });
 }
 
-function createModelMatrix(model: any) {
+function createModelMatrix(model: ModelDefinition) {
   const position = Cartesian3.fromDegrees(
     model.lng,
     model.lat,
@@ -332,6 +387,69 @@ function createModelMatrix(model: any) {
 function toFiniteNumber(value: unknown): number | undefined {
   const numeric = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+/**
+ * Derives a ground-level footprint from an already-loaded (ready) Cesium Model.
+ *
+ * `model.boundingSphere` is in world (ECEF) space after the model is ready —
+ * no additional transform is needed. We build an 8-point octagon around the
+ * sphere's ground-projected centre with radius equal to the sphere radius.
+ * The caller's `bufferPositions` step will expand it by the configured metres.
+ */
+function extractFootprintFromModel(model: Model): Cartesian3[] | null {
+  try {
+    // Already world-space after model.ready — do NOT apply modelMatrix again.
+    const worldBS = model.boundingSphere;
+    if (worldBS.radius <= 0) {
+      console.warn('[extractFootprintFromModel] bounding sphere radius = 0');
+      return null;
+    }
+
+    const center = Cartographic.fromCartesian(worldBS.center);
+    if (!center) return null;
+
+    const lat = (center.latitude * 180) / Math.PI;
+    const lng = (center.longitude * 180) / Math.PI;
+    const latDelta = worldBS.radius / 111320;
+    const lngDelta = worldBS.radius / (111320 * Math.cos(center.latitude));
+
+    // Single pass — no intermediate [number, number][] array needed.
+    return Array.from({ length: 8 }, (_, a) => {
+      const angle = (a * Math.PI * 2) / 8;
+      return Cartesian3.fromDegrees(
+        lng + lngDelta * Math.cos(angle),
+        lat + latDelta * Math.sin(angle),
+        0
+      );
+    });
+  } catch (e) {
+    console.warn('[extractFootprintFromModel] exception:', e);
+    return null;
+  }
+}
+
+/**
+ * Expands a polygon (defined by Cartesian3 positions) radially outward from its
+ * centroid by `bufferMeters` metres. Each vertex is moved away from the centroid
+ * along the vector centroid→vertex.
+ */
+function bufferPositions(positions: Cartesian3[], bufferMeters: number): Cartesian3[] {
+  // Mutate acc in-place to avoid allocating a new Cartesian3 on every iteration.
+  const centroid = positions.reduce(
+    (acc, p) => Cartesian3.add(acc, p, acc),
+    new Cartesian3()
+  );
+  Cartesian3.divideByScalar(centroid, positions.length, centroid);
+
+  return positions.map((p) => {
+    const dir = Cartesian3.subtract(p, centroid, new Cartesian3());
+    const dist = Cartesian3.magnitude(dir);
+    if (dist === 0) return Cartesian3.clone(p);
+    Cartesian3.normalize(dir, dir);
+    Cartesian3.multiplyByScalar(dir, dist + bufferMeters, dir);
+    return Cartesian3.add(centroid, dir, new Cartesian3());
+  });
 }
 
 function resolveHeightReference(value?: string): HeightReference | undefined {
@@ -383,5 +501,22 @@ function waitNextFrame() {
       return;
     }
     setTimeout(() => resolve(), 16);
+  });
+}
+
+/**
+ * Resolves when `model.ready` is true (i.e. after Cesium's render loop has
+ * uploaded all GPU buffers and populated `_loader._components`).
+ */
+function waitForModelReady(model: Model): Promise<void> {
+  return new Promise((resolve) => {
+    if ((model as any).ready) {
+      resolve();
+      return;
+    }
+    const remove = model.readyEvent.addEventListener(() => {
+      remove();
+      resolve();
+    });
   });
 }
