@@ -37,7 +37,6 @@ Alla globinställningar kan konfigureras i `index.json` under sektionen `"3D"`. 
     "viewShed": true,
     "streetView": true,
     "streetViewMap": "Namn av ett av lagren från 'layers'",
-    "fx": false,
     "drawTool": {
       "active": true,
       "options": {
@@ -55,7 +54,6 @@ Alla globinställningar kan konfigureras i `index.json` under sektionen `"3D"`. 
     "measure": true,
     "quickTimeShadowPicker": true,
     "flyTo": false,
-    "deactivateControls": [],
     "settings": {
       "depthTestAgainstTerrain": true,
       "enableAtmosphere": true,
@@ -101,9 +99,7 @@ Alla globinställningar kan konfigureras i `index.json` under sektionen `"3D"`. 
 | `measure` | boolean | `false` | Aktivera 3D-mätverktyg |
 | `quickTimeShadowPicker` | boolean | `false` | Aktivera snabbväljare för tid/datum för skuggor |
 | `flyTo` | boolean | `false` | Animera kameran vid val av objekt |
-| `fx` | boolean | `false` | Aktivera extra visuella effekter |
 | `drawTool` | object/boolean | `false` | Ritverktygets konfiguration (se nedan) |
-| `deactivateControls` | string[] | `[]` | Lista över Origo-kontroller att dölja när 3D är aktivt |
 | `cesiumIontoken` | string | - | Din Cesium Ion-åtkomsttoken |
 | `cesiumTerrainProvider` | string | - | Sökväg till anpassade terrängplattor |
 

@@ -99,9 +99,7 @@ All globe settings can be configured in `index.json` under the `"3D"` section. T
 | `measure` | boolean | `false` | Enable 3D measurement tools |
 | `quickTimeShadowPicker` | boolean | `false` | Enable quick time/date picker for shadows |
 | `flyTo` | boolean | `false` | Animate camera when selecting objects |
-| `fx` | boolean | `false` | Enable extra visual effects |
 | `drawTool` | object/boolean | `false` | Drawing tool configuration (see below) |
-| `deactivateControls` | string[] | `[]` | List of Origo controls to hide when 3D is active |
 | `cesiumIontoken` | string | - | Your Cesium Ion access token |
 | `cesiumTerrainProvider` | string | - | Path to custom terrain tiles |
 
