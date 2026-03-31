@@ -1,7 +1,7 @@
 import * as Cesium from 'cesium';
 
 import polygonDrawTool, { PolygonData } from '../functions/polygonDrawTool';
-import { polygonToolbarHtml, polygonEditPanelHtml, PolygonToolbarOptions } from '../uiTemplates';
+import { polygonToolbarHtml, polygonEditPanelHtml, polygonTranslateArrowsHtml, PolygonToolbarOptions } from '../uiTemplates';
 import {
   decodeCompressedBase64UrlToJson,
   encodeCompressedJsonToBase64Url,
@@ -69,9 +69,36 @@ export const createPolygonUi = (deps: {
 
   let polygonToolbarEl: HTMLElement | null = null;
   let polygonEditPanelEl: HTMLElement | null = null;
+  let polygonTranslateArrowsEl: HTMLElement | null = null;
   let polygonTool: ReturnType<typeof polygonDrawTool> | null = null;
   let polygonToolIsDrawing = false;
   let rectangleToolIsDrawing = false;
+  let selectedPolygonForArrows: PolygonData | null = null;
+  let cameraChangeListener: Cesium.Event.RemoveCallback | null = null;
+
+  // Disable/enable draw toolbar when polygon is selected/deselected
+  const setDrawToolbarEnabled = (enabled: boolean) => {
+    const toolbarButtons = [
+      'polygon-draw',
+      'rectangle-draw', 
+      'polygon-height-button',
+      'polygon-color-button',
+      'polygon-opacity-toggle',
+      'polygon-labels-toggle',
+      'polygon-download-button',
+      'polygon-share',
+      'polygon-clear',
+    ];
+    
+    toolbarButtons.forEach(id => {
+      const btn = document.getElementById(id) as HTMLButtonElement | null;
+      if (btn) {
+        btn.disabled = !enabled;
+        btn.style.opacity = enabled ? '1' : '0.4';
+        btn.style.pointerEvents = enabled ? 'auto' : 'none';
+      }
+    });
+  };
 
   const hideEditPanel = () => {
     if (polygonEditPanelEl) {
@@ -80,12 +107,19 @@ export const createPolygonUi = (deps: {
     // Close any open popovers
     document.getElementById('polygon-edit-height-popover')?.classList.remove('o-active');
     document.getElementById('polygon-edit-color-popover')?.classList.remove('o-active');
+    // Hide translate arrows
+    hideTranslateArrows();
+    // Re-enable the draw toolbar
+    setDrawToolbarEnabled(true);
   };
 
   const showEditPanel = (polygon: PolygonData) => {
     if (!polygonEditPanelEl) return;
 
     polygonEditPanelEl.style.display = 'flex';
+    showTranslateArrows(polygon);
+    // Disable the draw toolbar while editing
+    setDrawToolbarEnabled(false);
 
     // Populate fields with polygon data
     const nameInput = document.getElementById('polygon-edit-name') as HTMLInputElement | null;
@@ -120,6 +154,188 @@ export const createPolygonUi = (deps: {
     if (lower.includes('255, 255, 0') || lower === '#ffff00' || lower === 'yellow') return 'yellow';
     if (lower.includes('0, 255, 255') || lower === '#00ffff' || lower === 'cyan') return 'cyan';
     return 'white';
+  };
+
+  // Translate arrows overlay management
+  const hideTranslateArrows = () => {
+    if (polygonTranslateArrowsEl) {
+      polygonTranslateArrowsEl.style.display = 'none';
+    }
+    selectedPolygonForArrows = null;
+  };
+
+  const showTranslateArrows = (polygon: PolygonData) => {
+    selectedPolygonForArrows = polygon;
+    if (!polygonTranslateArrowsEl) return;
+    polygonTranslateArrowsEl.style.display = 'block';
+    updateTranslateArrowsPosition();
+  };
+
+  const updateTranslateArrowsPosition = () => {
+    if (!polygonTranslateArrowsEl || !selectedPolygonForArrows || !scene) return;
+
+    const polygon = selectedPolygonForArrows;
+    
+    // Calculate centroid of polygon positions
+    const positions = polygon.positions;
+    if (!positions || positions.length === 0) return;
+
+    const centroid = Cesium.Cartesian3.fromRadians(
+      positions.reduce((sum, p) => sum + Cesium.Cartographic.fromCartesian(p).longitude, 0) / positions.length,
+      positions.reduce((sum, p) => sum + Cesium.Cartographic.fromCartesian(p).latitude, 0) / positions.length,
+      polygon.baseHeight + polygon.extrudeHeight / 2
+    );
+
+    // Convert to screen coordinates
+    const screenPos = Cesium.SceneTransforms.worldToWindowCoordinates(scene, centroid);
+    if (!screenPos) {
+      polygonTranslateArrowsEl.style.display = 'none';
+      return;
+    }
+
+    // Position the drag handle at centroid
+    const handle = document.getElementById('polygon-translate-handle') as HTMLElement | null;
+    if (handle) {
+      handle.style.left = `${screenPos.x}px`;
+      handle.style.top = `${screenPos.y}px`;
+    }
+
+    polygonTranslateArrowsEl.style.display = 'block';
+  };
+
+  const mountTranslateArrowsIfNeeded = () => {
+    if (polygonTranslateArrowsEl) return;
+    if (!scene) return;
+
+    polygonTranslateArrowsEl = injectIntoMap(polygonTranslateArrowsHtml()) ?? null;
+    if (!polygonTranslateArrowsEl) return;
+
+    const handle = document.getElementById('polygon-translate-handle') as HTMLElement | null;
+    if (!handle) return;
+
+    // Drag state
+    let isDragging = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+
+    // Apply translation in world coordinates (east=dx, north=dy)
+    const applyTranslation = (dx: number, dy: number) => {
+      if (!polygonTool || !selectedPolygonForArrows) return;
+      polygonTool.translatePolygon?.(selectedPolygonForArrows.id, dx, dy);
+      // Update the reference to the polygon after translation
+      selectedPolygonForArrows = polygonTool.getSelectedPolygon?.() || null;
+      updateTranslateArrowsPosition();
+      requestSceneRender();
+    };
+
+    // Convert screen pixel delta to world meters based on camera
+    const screenPixelsToMeters = (pixelDx: number, pixelDy: number) => {
+      if (!scene) return { dx: 0, dy: 0 };
+      
+      // Get approximate meters per pixel based on camera altitude
+      const cameraHeight = scene.camera.positionCartographic?.height || 1000;
+      // Rough approximation: at ground level, 1 pixel ≈ cameraHeight / 1000 meters
+      // This gives a reasonable feel for dragging at various zoom levels
+      const metersPerPixel = Math.max(0.01, cameraHeight / 1500);
+      
+      const heading = scene.camera.heading; // radians, 0=north, increases clockwise
+      
+      // Screen up direction in world: (sin(heading), cos(heading)) = (east, north)
+      // Screen right direction in world: (cos(heading), -sin(heading))
+      const sinH = Math.sin(heading);
+      const cosH = Math.cos(heading);
+      
+      // Invert Y because screen Y increases downward but we want up = forward
+      const screenDx = pixelDx * metersPerPixel;
+      const screenDy = -pixelDy * metersPerPixel;
+      
+      // Convert screen-relative to world coordinates
+      const worldDx = screenDy * sinH + screenDx * cosH;  // east component
+      const worldDy = screenDy * cosH - screenDx * sinH;  // north component
+      
+      return { dx: worldDx, dy: worldDy };
+    };
+
+    const onMouseDown = (e: MouseEvent) => {
+      stopDomEvent(e);
+      isDragging = true;
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+      handle.style.cursor = 'grabbing';
+      handle.style.background = 'rgba(200,220,255,0.95)';
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isDragging) return;
+      stopDomEvent(e);
+      
+      const deltaX = e.clientX - lastMouseX;
+      const deltaY = e.clientY - lastMouseY;
+      
+      if (Math.abs(deltaX) > 0 || Math.abs(deltaY) > 0) {
+        const { dx, dy } = screenPixelsToMeters(deltaX, deltaY);
+        applyTranslation(dx, dy);
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+      }
+    };
+
+    const onMouseUp = (e: MouseEvent) => {
+      if (!isDragging) return;
+      stopDomEvent(e);
+      isDragging = false;
+      handle.style.cursor = 'move';
+      handle.style.background = 'rgba(255,255,255,0.95)';
+    };
+
+    // Mouse events
+    handle.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+
+    // Touch events for mobile
+    handle.addEventListener('touchstart', (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        stopDomEvent(e);
+        isDragging = true;
+        lastMouseX = e.touches[0].clientX;
+        lastMouseY = e.touches[0].clientY;
+        handle.style.background = 'rgba(200,220,255,0.95)';
+      }
+    });
+
+    document.addEventListener('touchmove', (e: TouchEvent) => {
+      if (!isDragging || e.touches.length !== 1) return;
+      
+      const deltaX = e.touches[0].clientX - lastMouseX;
+      const deltaY = e.touches[0].clientY - lastMouseY;
+      
+      if (Math.abs(deltaX) > 0 || Math.abs(deltaY) > 0) {
+        const { dx, dy } = screenPixelsToMeters(deltaX, deltaY);
+        applyTranslation(dx, dy);
+        lastMouseX = e.touches[0].clientX;
+        lastMouseY = e.touches[0].clientY;
+      }
+    });
+
+    document.addEventListener('touchend', () => {
+      isDragging = false;
+      handle.style.background = 'rgba(255,255,255,0.95)';
+    });
+
+    // Listen for camera changes to update handle position
+    cameraChangeListener = scene.camera.changed.addEventListener(() => {
+      if (selectedPolygonForArrows) {
+        updateTranslateArrowsPosition();
+      }
+    });
+
+    // Also update on preRender for smoother tracking during camera movement
+    scene.preRender.addEventListener(() => {
+      if (selectedPolygonForArrows) {
+        updateTranslateArrowsPosition();
+      }
+    });
   };
 
   const setPolygonToolbarVisible = (visible: boolean) => {
@@ -658,6 +874,11 @@ export const createPolygonUi = (deps: {
     const colorPopover = document.getElementById('polygon-edit-color-popover') as HTMLElement | null;
     const colorSelect = document.getElementById('polygon-edit-color-select') as HTMLSelectElement | null;
     const opacityButton = document.getElementById('polygon-edit-opacity-toggle') as HTMLButtonElement | null;
+    const rotateButton = document.getElementById('polygon-edit-rotate-button') as HTMLButtonElement | null;
+    const rotatePopover = document.getElementById('polygon-edit-rotate-popover') as HTMLElement | null;
+    const rotateInput = document.getElementById('polygon-edit-rotate-input') as HTMLInputElement | null;
+    const rotateCcwButton = document.getElementById('polygon-rotate-ccw') as HTMLButtonElement | null;
+    const rotateCwButton = document.getElementById('polygon-rotate-cw') as HTMLButtonElement | null;
     const deleteButton = document.getElementById('polygon-edit-delete') as HTMLButtonElement | null;
     const deselectButton = document.getElementById('polygon-edit-deselect') as HTMLButtonElement | null;
 
@@ -691,6 +912,7 @@ export const createPolygonUi = (deps: {
           // Close any other open edit popovers first
           document.getElementById('polygon-edit-height-popover')?.classList.remove('o-active');
           document.getElementById('polygon-edit-color-popover')?.classList.remove('o-active');
+          document.getElementById('polygon-edit-rotate-popover')?.classList.remove('o-active');
           
           popoverEl.classList.add('o-active');
           options.onOpen?.();
@@ -715,6 +937,7 @@ export const createPolygonUi = (deps: {
     });
 
     attachEditPopoverToggle(colorButton, colorPopover);
+    attachEditPopoverToggle(rotateButton, rotatePopover);
 
     // Name change handler
     if (nameInput) {
@@ -760,6 +983,32 @@ export const createPolygonUi = (deps: {
         requestSceneRender();
       });
     }
+
+    // Rotation handlers
+    const applyRotation = (angle: number) => {
+      if (!polygonTool) return;
+      const selected = polygonTool.getSelectedPolygon?.();
+      if (!selected) return;
+      polygonTool.rotatePolygon?.(selected.id, angle);
+      requestSceneRender();
+    };
+
+    if (rotateCcwButton) {
+      rotateCcwButton.addEventListener('click', () => {
+        const angle = parseFloat(rotateInput?.value || '15') || 15;
+        applyRotation(-angle);
+      });
+    }
+
+    if (rotateCwButton) {
+      rotateCwButton.addEventListener('click', () => {
+        const angle = parseFloat(rotateInput?.value || '15') || 15;
+        applyRotation(angle);
+      });
+    }
+
+    // Mount translate arrows overlay
+    mountTranslateArrowsIfNeeded();
 
     // Delete handler
     if (deleteButton) {
@@ -875,7 +1124,13 @@ export const createPolygonUi = (deps: {
     polygonTool = null;
     polygonToolbarEl = null;
     polygonEditPanelEl = null;
+    polygonTranslateArrowsEl = null;
     polygonToolIsDrawing = false;
+    selectedPolygonForArrows = null;
+    if (cameraChangeListener) {
+      cameraChangeListener();
+      cameraChangeListener = null;
+    }
     // All polygons (including imported shared ones) are now managed by polygonTool.destroy()
   };
 

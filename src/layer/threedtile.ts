@@ -22,12 +22,13 @@ import {
 } from 'cesium';
 import GeoJSON from 'ol/format/GeoJSON';
 import OLMap from 'ol/Map';
-import { loadTrees } from '../functions/loadTrees';
+import { load3DObject } from '../functions/load3DObject';
 import {
   MaskConfig,
   ModelDefinition,
   ThreedTileLayer as BaseThreedTileLayer,
-  applyMask
+  applyMask,
+  toggleMask
 } from '../functions/tileClipping';
 
 interface ExtrusionConfig {
@@ -58,6 +59,7 @@ interface LayerOptions {
 
 type ThreedTileLayer = LayerOptions & BaseThreedTileLayer & {
   CesiumExtrusions?: Primitive[];
+  objectScheduler?: { setVisible: (v: boolean) => void };
   on?: (type: string, listener: () => void) => void;
 };
 
@@ -108,6 +110,14 @@ export default async function load3DLayers(
 
   threedLayers.forEach((layer) =>
     layer.on?.('change:visible', () => {
+      const visible = layer.get('visible') as boolean;
+
+      // If this layer has masks (i.e., it's a model layer with GLBs that clips tilesets),
+      // toggle its mask on/off based on visibility
+      if (layer.get('mask') && layer.OwnClippingPolygons?.size) {
+        toggleMask(layer, threedLayers, visible);
+      }
+
       void ensureLayerInitialized(scene, layer, cesiumIontoken).then(() => {
         // Re-apply masks in case this layer is a tileset that was invisible when
         // applyMask first ran — its CesiumTileset won't have been set yet then.
@@ -130,13 +140,8 @@ async function ensureLayerInitialized(
   cesiumIontoken: string,
   forceInit = false
 ) {
-  if (!forceInit && !layer.get('visible')) {
-    return;
-  }
-
-  if (layer.CesiumExtrusions || layer.CesiumModels || layer.CesiumTileset) {
-    return;
-  }
+  if (!forceInit && !layer.get('visible')) return;
+  if (layer.CesiumExtrusions || layer.CesiumModels || layer.CesiumTileset || layer.objectScheduler) return;
 
   const dataType = layer.get('dataType');
   if (dataType === 'extrusion') {
@@ -149,10 +154,10 @@ async function ensureLayerInitialized(
     return;
   }
 
-  // if (layer.get('model')) {
-  //   await loadTrees(layer, scene, layer.get('model'));
-  //   return;
-  // }
+  if (layer.get('model')) {
+    await load3DObject(layer, scene, layer.get('model'));
+    return;
+  }
 
   await loadTilesetLayer(scene, layer, cesiumIontoken);
 }

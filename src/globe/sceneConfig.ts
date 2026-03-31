@@ -7,7 +7,12 @@ import type { GLTFAsset, GlobeSettings } from './types';
 
 export const configureScene = (scene: Cesium.Scene, settings: GlobeSettings): void => {
   // @ts-ignore: Ignore error if scene.clock is not writable
-  scene.clock = new Cesium.Clock();
+  const clock = new Cesium.Clock({
+    shouldAnimate: true,  // Enable clock animation for model animations
+    multiplier: 1.0
+  });
+  // @ts-ignore
+  scene.clock = clock;
   if (scene.skyAtmosphere) {
     scene.skyAtmosphere.show = settings.enableAtmosphere ?? false;
   }

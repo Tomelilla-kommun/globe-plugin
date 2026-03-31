@@ -91,31 +91,39 @@ export function createMiniMap(globe: Globe, containerDiv: HTMLDivElement, name:s
   // Use duck typing instead of instanceof (avoids issues with multiple OL bundles)
   let clonedLayer: TileLayer<any> | undefined;
   if (foundLayer && typeof (foundLayer as any).getSource === 'function') {
-    const source = (foundLayer as any).getSource();
-    if (source) {
+    const originalSource = (foundLayer as any).getSource();
+    if (originalSource && typeof originalSource.getUrls === 'function' && typeof originalSource.getParams === 'function') {
+      // Create a NEW source instead of reusing
+      const wmsOptions: any = {
+        url: originalSource.getUrls()[0],
+        params: originalSource.getParams(),
+        crossOrigin: 'anonymous',
+      };
+      // Only add serverType if available (TileWMS specific)
+      if (typeof originalSource.getServerType === 'function') {
+        wmsOptions.serverType = originalSource.getServerType();
+      }
       clonedLayer = new TileLayer({
-        source: source,
-        visible: true, 
+        source: new TileWMS(wmsOptions),
+        visible: true,
       });
     }
   }
-
-  console.log(clonedLayer)
-  
+    
   const miniMap = new Map({
-    target: undefined,
+    target: undefined, // Set later via mount()
     layers: clonedLayer ? [clonedLayer] : [],
     view: miniView,
     controls: [],
-        interactions: defaultInteractions({ 
-        dragPan: false, 
-        mouseWheelZoom: true, 
-        pinchZoom: false, 
-        doubleClickZoom: true,
-        shiftDragZoom: false,
-        keyboard: false,
-        altShiftDragRotate: false,
-        pinchRotate: false
+    interactions: defaultInteractions({ 
+      dragPan: false, 
+      mouseWheelZoom: true, 
+      pinchZoom: false, 
+      doubleClickZoom: true,
+      shiftDragZoom: false,
+      keyboard: false,
+      altShiftDragRotate: false,
+      pinchRotate: false
     })
   });
 

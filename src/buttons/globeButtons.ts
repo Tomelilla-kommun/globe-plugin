@@ -59,7 +59,7 @@ export function getGlobeButtonConfigs(options: GlobeButtonsOptions): ButtonConfi
     {
       id: BUTTON_IDS.DRAW_TOOL,
       icon: '#fa-pencil',
-      tooltipText: 'Ritverktyg',
+      tooltipText: 'Rita',
       hidden: true,
       enabled: drawTool,
     },

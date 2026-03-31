@@ -590,6 +590,7 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
         map,
         target: oGlobeTarget,
         time: () => {
+          // Static time for shadow positioning from time picker
           const val = (fp?.input as HTMLInputElement)?.value;
           return Cesium.JulianDate.fromDate(val ? new Date(val) : new Date());
         },

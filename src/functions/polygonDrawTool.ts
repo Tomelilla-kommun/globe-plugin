@@ -38,28 +38,87 @@ function computeDistance(p1: Cartesian3, p2: Cartesian3): number {
   return Cartesian3.distance(p1, p2);
 }
 
-// Helper: compute 4 corners of rectangle from 2 opposite corners
+// Helper: compute 4 corners of rotated rectangle from 2 points defining one edge and a perpendicular width
+// The edge goes from edgeStart to edgeEnd, and the rectangle extends perpendicular by 'width'
+// 'width' can be negative to extend in the opposite perpendicular direction
 // Returns corners in order: [corner1, corner2, corner3, corner4] forming a closed rectangle
-function computeRectangleCorners(corner1: Cartesian3, corner3: Cartesian3): Cartesian3[] {
-  const c1 = Cartographic.fromCartesian(corner1);
-  const c3 = Cartographic.fromCartesian(corner3);
+function computeRectangleCorners(edgeStart: Cartesian3, edgeEnd: Cartesian3, width: number): Cartesian3[] {
+  const c1 = Cartographic.fromCartesian(edgeStart);
+  const c2 = Cartographic.fromCartesian(edgeEnd);
   
   // Get the lowest height for the base
-  const baseHeight = Math.min(c1.height, c3.height);
+  const baseHeight = Math.min(c1.height, c2.height);
   
-  // Corner 2: same lat as corner1, same lon as corner3
-  const c2 = new Cartographic(c3.longitude, c1.latitude, baseHeight);
+  // Calculate the edge direction in local tangent plane (meters)
+  const R = 6371000; // Earth radius in meters
+  const centerLat = (c1.latitude + c2.latitude) / 2;
   
-  // Corner 4: same lon as corner1, same lat as corner3
-  const c4 = new Cartographic(c1.longitude, c3.latitude, baseHeight);
+  // Convert to local XY coordinates (meters from c1)
+  const dx = (c2.longitude - c1.longitude) * Math.cos(centerLat) * R;
+  const dy = (c2.latitude - c1.latitude) * R;
+  const edgeLength = Math.sqrt(dx * dx + dy * dy);
   
-  // Create Cartesian positions
+  if (edgeLength < 0.001) {
+    // Edge too short, return degenerate rectangle
+    return [edgeStart, edgeStart, edgeStart, edgeStart];
+  }
+  
+  // Perpendicular direction (rotate 90 degrees)
+  // Perpendicular vector: (-dy, dx) normalized then scaled by width
+  const perpDx = -dy / edgeLength * width;
+  const perpDy = dx / edgeLength * width;
+  
+  // Convert perpendicular offset back to lon/lat
+  const perpDLon = perpDx / (Math.cos(centerLat) * R);
+  const perpDLat = perpDy / R;
+  
+  // Corner 1: edgeStart
+  // Corner 2: edgeEnd  
+  // Corner 3: edgeEnd + perpendicular
+  // Corner 4: edgeStart + perpendicular
   return [
     Cartesian3.fromRadians(c1.longitude, c1.latitude, baseHeight),
     Cartesian3.fromRadians(c2.longitude, c2.latitude, baseHeight),
-    Cartesian3.fromRadians(c3.longitude, c3.latitude, baseHeight),
-    Cartesian3.fromRadians(c4.longitude, c4.latitude, baseHeight),
+    Cartesian3.fromRadians(c2.longitude + perpDLon, c2.latitude + perpDLat, baseHeight),
+    Cartesian3.fromRadians(c1.longitude + perpDLon, c1.latitude + perpDLat, baseHeight),
   ];
+}
+
+// Helper: compute perpendicular distance from a point to an edge (signed)
+// Returns distance in meters, positive on one side, negative on the other
+function computePerpendicularWidth(edgeStart: Cartesian3, edgeEnd: Cartesian3, point: Cartesian3): number {
+  const R = 6371000;
+  const c1 = Cartographic.fromCartesian(edgeStart);
+  const c2 = Cartographic.fromCartesian(edgeEnd);
+  const cp = Cartographic.fromCartesian(point);
+  
+  const centerLat = (c1.latitude + c2.latitude) / 2;
+  
+  // Convert to local XY (meters)
+  const x1 = 0;
+  const y1 = 0;
+  const x2 = (c2.longitude - c1.longitude) * Math.cos(centerLat) * R;
+  const y2 = (c2.latitude - c1.latitude) * R;
+  const xp = (cp.longitude - c1.longitude) * Math.cos(centerLat) * R;
+  const yp = (cp.latitude - c1.latitude) * R;
+  
+  // Edge vector
+  const edgeDx = x2 - x1;
+  const edgeDy = y2 - y1;
+  const edgeLen = Math.sqrt(edgeDx * edgeDx + edgeDy * edgeDy);
+  
+  if (edgeLen < 0.001) return 0;
+  
+  // Perpendicular (left-hand) normal: (-edgeDy, edgeDx) normalized
+  const nx = -edgeDy / edgeLen;
+  const ny = edgeDx / edgeLen;
+  
+  // Vector from edge start to point
+  const vx = xp - x1;
+  const vy = yp - y1;
+  
+  // Signed distance = dot product with normal
+  return vx * nx + vy * ny;
 }
 
 // Data structure for a single completed polygon
@@ -104,6 +163,7 @@ export default function polygonDrawTool(scene: Scene) {
   // Rectangle drawing state
   let isDrawingRectangle = false;
   let rectangleCorner1: Cartesian3 | null = null;
+  let rectangleCorner2: Cartesian3 | null = null; // Second corner (end of first edge)
   let rectangleSideLabels: Label[] = [];
 
   const labelCollection = new LabelCollection();
@@ -342,7 +402,7 @@ export default function polygonDrawTool(scene: Scene) {
 
       // Compute area for preview
       const area = computePolygonArea(flattenedPoints);
-      areaText = ` | Area: ${area.toFixed(1)} m²`;
+      areaText = ` | Yta: ${area.toFixed(1)} m²`;
     }
 
     // Update label with area/info
@@ -354,7 +414,7 @@ export default function polygonDrawTool(scene: Scene) {
       const lastPoint = previewPoints[previewPoints.length - 1];
       activeLabel = labelCollection.add({
         position: lastPoint,
-        text: `${previewPoints.length} points | Height: ${extrudeHeight}m${areaText}`,
+        text: `${previewPoints.length} punkter | Höjd: ${extrudeHeight}m${areaText}`,
         font: "20px sans-serif",
         fillColor: Color.WHITE,
         outlineColor: Color.BLACK,
@@ -442,7 +502,7 @@ export default function polygonDrawTool(scene: Scene) {
     const defaultName = `Polygon ${featureIdCounter}`;
     const label = labelCollection.add({
       position: center,
-      text: `${defaultName}\nBase: ${lowestZ.toFixed(2)}m\nHeight: ${extrudeHeight}m\nTop: ${(lowestZ + extrudeHeight).toFixed(2)}m\nArea: ${area.toFixed(1)} m²`,
+      text: `${defaultName}\nBas: ${lowestZ.toFixed(2)}m\nHöjd: ${extrudeHeight}m\nTopp: ${(lowestZ + extrudeHeight).toFixed(2)}m\nYta: ${area.toFixed(1)} m²`,
       font: "20px sans-serif",
       fillColor: Color.WHITE,
       outlineColor: Color.BLACK,
@@ -528,132 +588,165 @@ export default function polygonDrawTool(scene: Scene) {
     if (!rectangleCorner1) return;
     lastMousePos = currentMousePos;
 
-    // Compute rectangle corners from corner1 and current mouse position
-    const corners = computeRectangleCorners(rectangleCorner1, currentMousePos);
-
-    // Remove old preview polyline
+    // Remove old previews
     if (activePolylinePrimitive) {
       scene.primitives.remove(activePolylinePrimitive);
+      activePolylinePrimitive = null;
     }
-
-    // Create preview polyline (outline) - close the loop
-    const polylinePositions = [...corners, corners[0]];
-    const polylineInstance = new GeometryInstance({
-      geometry: new PolylineGeometry({
-        positions: polylinePositions,
-        width: 3,
-      }),
-      attributes: {
-        color: ColorGeometryInstanceAttribute.fromColor(fillColor.withAlpha(1))
-      }
-    });
-    activePolylinePrimitive = new Primitive({
-      geometryInstances: [polylineInstance],
-      appearance: new PolylineColorAppearance({})
-    });
-    scene.primitives.add(activePolylinePrimitive);
-
-    // Remove old preview polygon
     if (activePolygonPrimitive) {
       scene.primitives.remove(activePolygonPrimitive);
+      activePolygonPrimitive = null;
     }
-
-    // Get base height for extrusion
-    const lowestZ = getLowestZValue(corners);
-
-    // Create preview polygon (extruded rectangle)
-    const polygonInstance = new GeometryInstance({
-      geometry: new PolygonGeometry({
-        polygonHierarchy: {
-          positions: corners,
-          holes: []
-        },
-        extrudedHeight: lowestZ + extrudeHeight,
-        perPositionHeight: false,
-      }),
-      attributes: {
-        color: ColorGeometryInstanceAttribute.fromColor(fillColor.withAlpha(fillAlpha))
-      }
-    });
-
-    activePolygonPrimitive = new Primitive({
-      geometryInstances: [polygonInstance],
-      appearance: new PerInstanceColorAppearance({
-        translucent: fillAlpha < 1,
-        closed: true,
-        flat: true,
-        faceForward: false
-      }),
-      shadows: ShadowMode.ENABLED,
-    });
-    scene.primitives.add(activePolygonPrimitive);
-
-    // Clear old side labels
     clearRectangleSideLabels();
-
-    // Compute and display side lengths
-    const side1Length = computeDistance(corners[0], corners[1]); // Bottom
-    const side2Length = computeDistance(corners[1], corners[2]); // Right
-    const side3Length = computeDistance(corners[2], corners[3]); // Top
-    const side4Length = computeDistance(corners[3], corners[0]); // Left
-
-    // Create labels at midpoint of each side
-    const createSideLabel = (p1: Cartesian3, p2: Cartesian3, length: number): Label => {
-      const midpoint = Cartesian3.midpoint(p1, p2, new Cartesian3());
-      // Raise the label a bit above the surface for visibility
-      const midCarto = Cartographic.fromCartesian(midpoint);
-      const labelPos = Cartesian3.fromRadians(midCarto.longitude, midCarto.latitude, midCarto.height + 2);
-      
-      return labelCollection.add({
-        position: labelPos,
-        text: `${length.toFixed(1)} m`,
-        font: "bold 16px sans-serif",
-        fillColor: Color.WHITE,
-        outlineColor: Color.BLACK,
-        outlineWidth: 3,
-        style: LabelStyle.FILL_AND_OUTLINE,
-        verticalOrigin: VerticalOrigin.CENTER,
-        horizontalOrigin: HorizontalOrigin.CENTER,
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        show: true,
-      });
-    };
-
-    rectangleSideLabels.push(createSideLabel(corners[0], corners[1], side1Length));
-    rectangleSideLabels.push(createSideLabel(corners[1], corners[2], side2Length));
-    rectangleSideLabels.push(createSideLabel(corners[2], corners[3], side3Length));
-    rectangleSideLabels.push(createSideLabel(corners[3], corners[0], side4Length));
-
-    // Compute area
-    const area = computePolygonArea(corners);
-
-    // Update info label
     if (activeLabel) {
       labelCollection.remove(activeLabel);
+      activeLabel = null;
     }
 
-    activeLabel = labelCollection.add({
-      position: currentMousePos,
-      text: `Height: ${extrudeHeight}m | Area: ${area.toFixed(1)} m²`,
-      font: "20px sans-serif",
-      fillColor: Color.WHITE,
-      outlineColor: Color.BLACK,
-      outlineWidth: 2,
-      style: LabelStyle.FILL_AND_OUTLINE,
-      verticalOrigin: VerticalOrigin.BOTTOM,
-      horizontalOrigin: HorizontalOrigin.LEFT,
-      disableDepthTestDistance: Number.POSITIVE_INFINITY,
-      pixelOffset: new Cartesian2(10, 0),
-      show: labelsVisible,
-    });
+    if (!rectangleCorner2) {
+      // STATE 1: Drawing first edge (line from corner1 to mouse)
+      const polylineInstance = new GeometryInstance({
+        geometry: new PolylineGeometry({
+          positions: [rectangleCorner1, currentMousePos],
+          width: 4,
+        }),
+        attributes: {
+          color: ColorGeometryInstanceAttribute.fromColor(fillColor.withAlpha(1))
+        }
+      });
+      activePolylinePrimitive = new Primitive({
+        geometryInstances: [polylineInstance],
+        appearance: new PolylineColorAppearance({})
+      });
+      scene.primitives.add(activePolylinePrimitive);
+
+      // Show edge length
+      const edgeLength = computeDistance(rectangleCorner1, currentMousePos);
+      activeLabel = labelCollection.add({
+        position: currentMousePos,
+        text: `Kant: ${edgeLength.toFixed(1)}m\nKlicka för att sätta kantslut`,
+        font: "18px sans-serif",
+        fillColor: Color.WHITE,
+        outlineColor: Color.BLACK,
+        outlineWidth: 2,
+        style: LabelStyle.FILL_AND_OUTLINE,
+        verticalOrigin: VerticalOrigin.BOTTOM,
+        horizontalOrigin: HorizontalOrigin.LEFT,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        pixelOffset: new Cartesian2(10, 0),
+        show: true,
+      });
+
+    } else {
+      // STATE 2: Drawing perpendicular width (full rectangle preview)
+      const perpWidth = computePerpendicularWidth(rectangleCorner1, rectangleCorner2, currentMousePos);
+      const corners = computeRectangleCorners(rectangleCorner1, rectangleCorner2, perpWidth);
+
+      // Create preview polyline (outline) - close the loop
+      const polylinePositions = [...corners, corners[0]];
+      const polylineInstance = new GeometryInstance({
+        geometry: new PolylineGeometry({
+          positions: polylinePositions,
+          width: 3,
+        }),
+        attributes: {
+          color: ColorGeometryInstanceAttribute.fromColor(fillColor.withAlpha(1))
+        }
+      });
+      activePolylinePrimitive = new Primitive({
+        geometryInstances: [polylineInstance],
+        appearance: new PolylineColorAppearance({})
+      });
+      scene.primitives.add(activePolylinePrimitive);
+
+      // Get base height for extrusion
+      const lowestZ = getLowestZValue(corners);
+
+      // Create preview polygon (extruded rectangle)
+      const polygonInstance = new GeometryInstance({
+        geometry: new PolygonGeometry({
+          polygonHierarchy: {
+            positions: corners,
+            holes: []
+          },
+          extrudedHeight: lowestZ + extrudeHeight,
+          perPositionHeight: false,
+        }),
+        attributes: {
+          color: ColorGeometryInstanceAttribute.fromColor(fillColor.withAlpha(fillAlpha))
+        }
+      });
+
+      activePolygonPrimitive = new Primitive({
+        geometryInstances: [polygonInstance],
+        appearance: new PerInstanceColorAppearance({
+          translucent: fillAlpha < 1,
+          closed: true,
+          flat: true,
+          faceForward: false
+        }),
+        shadows: ShadowMode.ENABLED,
+      });
+      scene.primitives.add(activePolygonPrimitive);
+
+      // Compute and display side lengths
+      const side1Length = computeDistance(corners[0], corners[1]); // First edge
+      const side2Length = Math.abs(perpWidth); // Width
+
+      // Create labels at midpoint of each side
+      const createSideLabel = (p1: Cartesian3, p2: Cartesian3, length: number): Label => {
+        const midpoint = Cartesian3.midpoint(p1, p2, new Cartesian3());
+        const midCarto = Cartographic.fromCartesian(midpoint);
+        const labelPos = Cartesian3.fromRadians(midCarto.longitude, midCarto.latitude, midCarto.height + 2);
+        
+        return labelCollection.add({
+          position: labelPos,
+          text: `${length.toFixed(1)} m`,
+          font: "bold 16px sans-serif",
+          fillColor: Color.WHITE,
+          outlineColor: Color.BLACK,
+          outlineWidth: 3,
+          style: LabelStyle.FILL_AND_OUTLINE,
+          verticalOrigin: VerticalOrigin.CENTER,
+          horizontalOrigin: HorizontalOrigin.CENTER,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          show: true,
+        });
+      };
+
+      rectangleSideLabels.push(createSideLabel(corners[0], corners[1], side1Length));
+      rectangleSideLabels.push(createSideLabel(corners[1], corners[2], side2Length));
+      rectangleSideLabels.push(createSideLabel(corners[2], corners[3], side1Length));
+      rectangleSideLabels.push(createSideLabel(corners[3], corners[0], side2Length));
+
+      // Compute area
+      const area = side1Length * side2Length;
+
+      // Update info label
+      activeLabel = labelCollection.add({
+        position: currentMousePos,
+        text: `${side1Length.toFixed(1)}m × ${side2Length.toFixed(1)}m\nHöjd: ${extrudeHeight}m | Yta: ${area.toFixed(1)} m²\nKlicka för att slutföra`,
+        font: "18px sans-serif",
+        fillColor: Color.WHITE,
+        outlineColor: Color.BLACK,
+        outlineWidth: 2,
+        style: LabelStyle.FILL_AND_OUTLINE,
+        verticalOrigin: VerticalOrigin.BOTTOM,
+        horizontalOrigin: HorizontalOrigin.LEFT,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        pixelOffset: new Cartesian2(10, 0),
+        show: labelsVisible,
+      });
+    }
 
     scene.requestRender();
   }
 
-  function finalizeRectangle(corner3: Cartesian3) {
-    if (!rectangleCorner1) return;
+  function finalizeRectangle(widthPoint: Cartesian3) {
+    if (!rectangleCorner1 || !rectangleCorner2) return;
 
-    const corners = computeRectangleCorners(rectangleCorner1, corner3);
+    const perpWidth = computePerpendicularWidth(rectangleCorner1, rectangleCorner2, widthPoint);
+    const corners = computeRectangleCorners(rectangleCorner1, rectangleCorner2, perpWidth);
     const lowestZ = getLowestZValue(corners);
 
     const featureId = `poly-${featureIdCounter++}`;
@@ -716,10 +809,10 @@ export default function polygonDrawTool(scene: Scene) {
       corners.reduce((sum, p) => sum + Cartographic.fromCartesian(p).latitude, 0) / corners.length,
       lowestZ + extrudeHeight / 2
     );
-    const defaultName = `Rectangle ${featureIdCounter}`;
+    const defaultName = `Rektangel ${featureIdCounter}`;
     const label = labelCollection.add({
       position: center,
-      text: `${defaultName}\n${side1Length.toFixed(1)}m × ${side2Length.toFixed(1)}m\nHeight: ${extrudeHeight}m\nArea: ${area.toFixed(1)} m²`,
+      text: `${defaultName}\n${side1Length.toFixed(1)}m × ${side2Length.toFixed(1)}m\nHöjd: ${extrudeHeight}m\nYta: ${area.toFixed(1)} m²`,
       font: "20px sans-serif",
       fillColor: Color.WHITE,
       outlineColor: Color.BLACK,
@@ -780,6 +873,7 @@ export default function polygonDrawTool(scene: Scene) {
 
     // Reset for next rectangle
     rectangleCorner1 = null;
+    rectangleCorner2 = null;
     clearRectangleSideLabels();
     
     // Clear preview
@@ -800,12 +894,13 @@ export default function polygonDrawTool(scene: Scene) {
   function startDrawingRectangle() {
     isDrawingRectangle = true;
     rectangleCorner1 = null;
+    rectangleCorner2 = null;
 
     interface ClickEvent {
       position: { x: number; y: number };
     }
 
-    // Left click - first click sets corner 1, second click sets corner 3 (opposite)
+    // Left click - 3 clicks: corner1, corner2 (first edge), then width point
     handler.setInputAction((click: ClickEvent) => {
       const cartesian2Pos = new Cartesian2(click.position.x, click.position.y);
       
@@ -822,7 +917,7 @@ export default function polygonDrawTool(scene: Scene) {
       if (!cartesian) return;
 
       if (!rectangleCorner1) {
-        // First click - set corner 1
+        // First click - set corner 1 (start of first edge)
         rectangleCorner1 = cartesian.clone();
         
         // Show a marker at corner 1
@@ -831,7 +926,30 @@ export default function polygonDrawTool(scene: Scene) {
         }
         activeLabel = labelCollection.add({
           position: cartesian,
-          text: "Corner 1 - click opposite corner",
+          text: "Punkt 1 - klicka för att sätta kantslut",
+          font: "18px sans-serif",
+          fillColor: Color.WHITE,
+          outlineColor: Color.BLACK,
+          outlineWidth: 2,
+          style: LabelStyle.FILL_AND_OUTLINE,
+          verticalOrigin: VerticalOrigin.BOTTOM,
+          horizontalOrigin: HorizontalOrigin.LEFT,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          pixelOffset: new Cartesian2(10, 0),
+          show: true,
+        });
+        scene.requestRender();
+      } else if (!rectangleCorner2) {
+        // Second click - set corner 2 (end of first edge)
+        rectangleCorner2 = cartesian.clone();
+        
+        // Update label
+        if (activeLabel) {
+          labelCollection.remove(activeLabel);
+        }
+        activeLabel = labelCollection.add({
+          position: cartesian,
+          text: "Kant satt - klicka för att sätta bredd",
           font: "18px sans-serif",
           fillColor: Color.WHITE,
           outlineColor: Color.BLACK,
@@ -845,28 +963,38 @@ export default function polygonDrawTool(scene: Scene) {
         });
         scene.requestRender();
       } else {
-        // Second click - finalize rectangle
+        // Third click - finalize rectangle with width
         finalizeRectangle(cartesian);
       }
     }, ScreenSpaceEventType.LEFT_CLICK);
 
-    // Right click to cancel
+    // Right click to cancel or go back one step
     handler.setInputAction(() => {
-      rectangleCorner1 = null;
-      clearRectangleSideLabels();
-      
-      if (activePolylinePrimitive) {
-        scene.primitives.remove(activePolylinePrimitive);
-        activePolylinePrimitive = null;
+      if (rectangleCorner2) {
+        // Go back to edge drawing mode
+        rectangleCorner2 = null;
+        clearRectangleSideLabels();
+        if (activePolygonPrimitive) {
+          scene.primitives.remove(activePolygonPrimitive);
+          activePolygonPrimitive = null;
+        }
+        // Redraw the edge line
+        if (lastMousePos) {
+          updateRectanglePreview(lastMousePos);
+        }
+      } else if (rectangleCorner1) {
+        // Go back to start
+        rectangleCorner1 = null;
+        if (activePolylinePrimitive) {
+          scene.primitives.remove(activePolylinePrimitive);
+          activePolylinePrimitive = null;
+        }
+        if (activeLabel) {
+          labelCollection.remove(activeLabel);
+          activeLabel = null;
+        }
       }
-      if (activePolygonPrimitive) {
-        scene.primitives.remove(activePolygonPrimitive);
-        activePolygonPrimitive = null;
-      }
-      if (activeLabel) {
-        labelCollection.remove(activeLabel);
-        activeLabel = null;
-      }
+      // If nothing set, right-click does nothing (or could cancel the tool entirely)
       scene.requestRender();
     }, ScreenSpaceEventType.RIGHT_CLICK);
 
@@ -901,6 +1029,7 @@ export default function polygonDrawTool(scene: Scene) {
     isDrawingRectangle = false;
     removeDrawingHandlers();
     rectangleCorner1 = null;
+    rectangleCorner2 = null;
     clearRectangleSideLabels();
 
     // Remove active preview primitives/labels
@@ -1113,7 +1242,7 @@ export default function polygonDrawTool(scene: Scene) {
   }
 
   function updatePolygonLabel(polygon: PolygonData) {
-    polygon.label.text = `${polygon.name}\nBase: ${polygon.baseHeight.toFixed(2)}m\nHeight: ${polygon.extrudeHeight}m\nTop: ${(polygon.baseHeight + polygon.extrudeHeight).toFixed(2)}m\nArea: ${polygon.area.toFixed(1)} m²`;
+    polygon.label.text = `${polygon.name}\nBas: ${polygon.baseHeight.toFixed(2)}m\nHöjd: ${polygon.extrudeHeight}m\nTopp: ${(polygon.baseHeight + polygon.extrudeHeight).toFixed(2)}m\nYta: ${polygon.area.toFixed(1)} m²`;
   }
 
   function setPolygonName(polygonId: string, name: string) {
@@ -1269,7 +1398,7 @@ export default function polygonDrawTool(scene: Scene) {
     );
     polygon.label = labelCollection.add({
       position: center,
-      text: `${polygon.name}\nBase: ${polygon.baseHeight.toFixed(2)}m\nHeight: ${newHeight}m\nTop: ${(polygon.baseHeight + newHeight).toFixed(2)}m\nArea: ${polygon.area.toFixed(1)} m²`,
+      text: `${polygon.name}\nBas: ${polygon.baseHeight.toFixed(2)}m\nHöjd: ${newHeight}m\nTopp: ${(polygon.baseHeight + newHeight).toFixed(2)}m\nYta: ${polygon.area.toFixed(1)} m²`,
       font: "20px sans-serif",
       fillColor: Color.WHITE,
       outlineColor: Color.BLACK,
@@ -1312,6 +1441,97 @@ export default function polygonDrawTool(scene: Scene) {
     polygons.splice(index, 1);
 
     scene.requestRender();
+  }
+
+  // Rotate a polygon around its centroid by angleDegrees (positive = clockwise)
+  function rotatePolygon(polygonId: string, angleDegrees: number) {
+    const polygon = polygons.find(p => p.id === polygonId);
+    if (!polygon) return;
+
+    const angleRad = angleDegrees * Math.PI / 180;
+    const positions = polygon.positions;
+
+    // Calculate centroid in cartographic coordinates
+    const cartos = positions.map(p => Cartographic.fromCartesian(p));
+    const centroidLon = cartos.reduce((sum, c) => sum + c.longitude, 0) / cartos.length;
+    const centroidLat = cartos.reduce((sum, c) => sum + c.latitude, 0) / cartos.length;
+
+    // Convert positions to local XY (meters from centroid) using Earth radius
+    const R = 6371000;
+    const localXY = cartos.map(c => [
+      (c.longitude - centroidLon) * Math.cos(centroidLat) * R,
+      (c.latitude - centroidLat) * R
+    ]);
+
+    // Rotate each point around the origin (centroid)
+    const cosA = Math.cos(angleRad);
+    const sinA = Math.sin(angleRad);
+    const rotatedXY = localXY.map(([x, y]) => [
+      x * cosA - y * sinA,
+      x * sinA + y * cosA
+    ]);
+
+    // Convert back to Cartographic
+    const rotatedPositions = rotatedXY.map(([x, y]) => {
+      const newLon = centroidLon + x / (Math.cos(centroidLat) * R);
+      const newLat = centroidLat + y / R;
+      return Cartesian3.fromRadians(newLon, newLat, polygon.baseHeight);
+    });
+
+    // Update polygon positions
+    polygon.positions = rotatedPositions;
+
+    // Recalculate area
+    polygon.area = computePolygonArea(rotatedPositions);
+
+    // Update GeoJSON
+    if (polygon.geojsonFeature?.geometry?.coordinates) {
+      const coords = rotatedPositions.map(p => {
+        const c = Cartographic.fromCartesian(p);
+        return [CesiumMath.toDegrees(c.longitude), CesiumMath.toDegrees(c.latitude), polygon.baseHeight];
+      });
+      polygon.geojsonFeature.geometry.coordinates = [coords.concat([coords[0]])];
+    }
+
+    // Rebuild the polygon visuals with new positions
+    rebuildPolygonWithHeight(polygon, polygon.extrudeHeight);
+  }
+
+  // Translate a polygon by dx (east, meters) and dy (north, meters)
+  function translatePolygon(polygonId: string, dx: number, dy: number) {
+    const polygon = polygons.find(p => p.id === polygonId);
+    if (!polygon) return;
+
+    const positions = polygon.positions;
+    const R = 6371000; // Earth radius in meters
+
+    // Calculate centroid latitude for accurate projection
+    const cartos = positions.map(p => Cartographic.fromCartesian(p));
+    const centroidLat = cartos.reduce((sum, c) => sum + c.latitude, 0) / cartos.length;
+
+    // Convert dx/dy (meters) to delta lon/lat (radians)
+    const dLon = dx / (Math.cos(centroidLat) * R);
+    const dLat = dy / R;
+
+    // Apply translation to all positions
+    const translatedPositions = cartos.map(c => {
+      return Cartesian3.fromRadians(c.longitude + dLon, c.latitude + dLat, polygon.baseHeight);
+    });
+
+    // Update polygon positions
+    polygon.positions = translatedPositions;
+
+    // Update GeoJSON
+    if (polygon.geojsonFeature?.geometry?.coordinates) {
+      const coords = translatedPositions.map(p => {
+        const c = Cartographic.fromCartesian(p);
+        return [CesiumMath.toDegrees(c.longitude), CesiumMath.toDegrees(c.latitude), polygon.baseHeight];
+      });
+      polygon.geojsonFeature.geometry.coordinates = [coords.concat([coords[0]])];
+    }
+
+    // Rebuild the polygon visuals with new positions
+    rebuildPolygonWithHeight(polygon, polygon.extrudeHeight);
   }
 
   function getAllPolygons(): PolygonData[] {
@@ -1417,7 +1637,7 @@ export default function polygonDrawTool(scene: Scene) {
     );
     const label = labelCollection.add({
       position: center,
-      text: `${importName}\nBase: ${baseHeight.toFixed(2)}m\nHeight: ${importExtrudeHeight}m\nTop: ${(baseHeight + importExtrudeHeight).toFixed(2)}m\nArea: ${area.toFixed(1)} m²`,
+      text: `${importName}\nBas: ${baseHeight.toFixed(2)}m\nHöjd: ${importExtrudeHeight}m\nTopp: ${(baseHeight + importExtrudeHeight).toFixed(2)}m\nYta: ${area.toFixed(1)} m²`,
       font: "20px sans-serif",
       fillColor: Color.WHITE,
       outlineColor: Color.BLACK,
@@ -1495,6 +1715,8 @@ export default function polygonDrawTool(scene: Scene) {
     setPolygonOpacity,
     setPolygonHeight,
     deletePolygon,
+    rotatePolygon,
+    translatePolygon,
     getAllPolygons,
     // Import
     importPolygonFromGeoJSON,

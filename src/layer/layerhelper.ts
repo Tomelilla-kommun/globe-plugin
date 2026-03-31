@@ -27,7 +27,7 @@ export interface ThreedTileOptions extends Record<string, unknown> {
   extrusion?: ExtrusionOptions;
 }
 
-interface TreeScheduler {
+interface Object3DScheduler {
   setVisible: (visible: boolean) => void;
 }
 
@@ -75,7 +75,7 @@ const toggleVisibility = (items?: Array<{ show: boolean }>) => {
 };
 
 class ThreedTile extends Layer<Source> {
-  public treeScheduler?: TreeScheduler;
+  public objectScheduler?: Object3DScheduler;
   public CesiumTileset?: CesiumTilesetLike;
   public CesiumModels?: CesiumModelLike[];
   public CesiumExtrusions?: CesiumExtrusionLike[];
@@ -100,7 +100,7 @@ class ThreedTile extends Layer<Source> {
 
   public override setVisible(visible: boolean): void {
     this.set(LayerProperty.VISIBLE, visible);
-    this.treeScheduler?.setVisible(visible);
+    this.objectScheduler?.setVisible(visible);
 
     if (this.CesiumTileset) {
       this.CesiumTileset.show = !this.CesiumTileset.show;
