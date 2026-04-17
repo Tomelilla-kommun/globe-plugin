@@ -13,6 +13,7 @@ export const configureScene = (scene: Cesium.Scene, settings: GlobeSettings): vo
   });
   // @ts-ignore
   scene.clock = clock;
+  
   if (scene.skyAtmosphere) {
     scene.skyAtmosphere.show = settings.enableAtmosphere ?? false;
   }
@@ -52,7 +53,8 @@ export const configureScene = (scene: Cesium.Scene, settings: GlobeSettings): vo
 export const configureGlobeAppearance = (scene: Cesium.Scene, settings: GlobeSettings): void => {
   const globe = scene.globe;
   globe.depthTestAgainstTerrain = !!settings.depthTestAgainstTerrain;
-  globe.showGroundAtmosphere = !!settings.showGroundAtmosphere;
+  globe.showGroundAtmosphere = !!settings.enableGroundAtmosphere;
+  globe.enableLighting = !!settings.enableLighting;
   if (settings.skyBox) {
     const url = settings.skyBox.url;
     scene.skyBox = new Cesium.SkyBox({

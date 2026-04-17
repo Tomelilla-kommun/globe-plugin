@@ -8,6 +8,7 @@ export const BUTTON_IDS = {
   QUICK_TIME: 'quickTime',
   SHADOWS: 'shadows',
   FX: 'fx',
+  MEASURE_3D: 'measure3D',
 } as const;
 
 export type ButtonId = typeof BUTTON_IDS[keyof typeof BUTTON_IDS];
@@ -17,6 +18,7 @@ export interface GlobeButtonsOptions {
   drawTool?: boolean;
   quickTimeShadowPicker?: boolean;
   fx?: boolean;
+  measure?: boolean;
 }
 
 /**
@@ -24,7 +26,7 @@ export interface GlobeButtonsOptions {
  * Callbacks are provided separately to keep configs pure data.
  */
 export function getGlobeButtonConfigs(options: GlobeButtonsOptions): ButtonConfig[] {
-  const { viewShed, drawTool, quickTimeShadowPicker, fx } = options;
+  const { viewShed, drawTool, quickTimeShadowPicker, fx, measure } = options;
 
   return [
     {
@@ -71,6 +73,13 @@ export function getGlobeButtonConfigs(options: GlobeButtonsOptions): ButtonConfi
       enabled: viewShed,
     },
     {
+      id: BUTTON_IDS.MEASURE_3D,
+      icon: '#ic_straighten_24px',
+      tooltipText: 'Mät i 3D',
+      hidden: true,
+      enabled: measure,
+    },
+    {
       id: BUTTON_IDS.FX,
       cls: 'padding-small margin-bottom-smaller icon-smaller round light box-shadow active',
       icon: '#ic_cube_24px',
@@ -91,6 +100,7 @@ export const GLOBE_DEPENDENT_BUTTONS: ButtonId[] = [
   BUTTON_IDS.QUICK_TIME,
   BUTTON_IDS.DRAW_TOOL,
   BUTTON_IDS.VIEWSHED,
+  BUTTON_IDS.MEASURE_3D,
   BUTTON_IDS.FX,
 ];
 

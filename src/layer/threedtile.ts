@@ -17,9 +17,16 @@ import {
   PolygonHierarchy,
   ColorGeometryInstanceAttribute,
   PerInstanceColorAppearance,
-  ClippingPolygonCollection,
-  Cartographic
+  Cartographic,
+  ModelAnimationLoop
 } from 'cesium';
+import {
+  createSolidRoofColorShader,
+  createOrtofotoRoofColorShader,
+  loadRoofColorData,
+  getWmsLayerInfo,
+  setupLodRoofColor
+} from '../functions/roofColorDraping';
 import GeoJSON from 'ol/format/GeoJSON';
 import OLMap from 'ol/Map';
 import { load3DObject } from '../functions/load3DObject';
@@ -54,6 +61,20 @@ interface LayerOptions {
   mask?: Record<string, number | MaskConfig>;
   CesiumModels?: Model[];
   CesiumExtrusions?: Primitive[];
+  /** Roof color: hex RGB (e.g. "#ff0000") for solid color, or "sample" to sample from WMS ortofoto */
+  roofColor?: string;
+  /** Threshold for roof detection (0-1, default 0.7). Higher = more horizontal surfaces only */
+  roofNormalThreshold?: number;
+  /** Name of a WMS layer to sample roof colors from (e.g. "webservices:Ortofoto_0.16") */
+  roofColorLayer?: string;
+  /** Pre-generated roof color data file (JSON with imageUrl and bounds). If set, skips WMS fetch */
+  roofColorData?: string;
+  /** Camera altitude in meters to trigger high-res fetch (default 4000) */
+  roofColorLodDistance?: number;
+  /** Resolution of high-res ortofoto image (default 2048) */
+  roofColorImageSize?: number;
+  /** Radius in meters for high-res fetch area (default 600) - smaller = more detail */
+  roofColorFetchRadius?: number;
   [key: string]: unknown;
 }
 
@@ -68,6 +89,17 @@ const geoJsonFormat = new GeoJSON();
 const MAX_CONCURRENT_LOADS = 3;
 const PRIMITIVE_BATCH_SIZE = 100;
 
+// Precomputed constants for performance
+const RAD_TO_DEG = 180 / Math.PI;
+const OCTAGON_ANGLES = Array.from({ length: 8 }, (_, i) => (i * Math.PI * 2) / 8);
+const OCTAGON_COS = OCTAGON_ANGLES.map(Math.cos);
+const OCTAGON_SIN = OCTAGON_ANGLES.map(Math.sin);
+
+// Scratch objects to avoid GC pressure in hot paths
+const scratchCartesian3A = new Cartesian3();
+const scratchCartesian3B = new Cartesian3();
+const scratchCartographic = new Cartographic();
+
 export default async function load3DLayers(
   scene: Scene,
   map: OLMap,
@@ -80,7 +112,7 @@ export default async function load3DLayers(
   // CesiumTileset / CesiumModels reference is populated before mask application.
   await runWithConcurrency(
     threedLayers.map(
-      (layer) => () => ensureLayerInitialized(scene, layer, cesiumIontoken, true)
+      (layer) => () => ensureLayerInitialized(scene, map, layer, cesiumIontoken, true)
     ),
     MAX_CONCURRENT_LOADS
   );
@@ -118,7 +150,7 @@ export default async function load3DLayers(
         toggleMask(layer, threedLayers, visible);
       }
 
-      void ensureLayerInitialized(scene, layer, cesiumIontoken).then(() => {
+      void ensureLayerInitialized(scene, map, layer, cesiumIontoken).then(() => {
         // Re-apply masks in case this layer is a tileset that was invisible when
         // applyMask first ran — its CesiumTileset won't have been set yet then.
         const layerName = layer.get('name') as string;
@@ -136,6 +168,7 @@ export default async function load3DLayers(
 
 async function ensureLayerInitialized(
   scene: Scene,
+  map: OLMap,
   layer: ThreedTileLayer,
   cesiumIontoken: string,
   forceInit = false
@@ -159,7 +192,7 @@ async function ensureLayerInitialized(
     return;
   }
 
-  await loadTilesetLayer(scene, layer, cesiumIontoken);
+  await loadTilesetLayer(scene, map, layer, cesiumIontoken);
 }
 
 async function loadExtrusionLayer(scene: Scene, layer: ThreedTileLayer) {
@@ -241,6 +274,27 @@ async function loadModelLayer(scene: Scene, layer: ThreedTileLayer) {
   // Wait for every model to be GPU-ready before accessing boundingSphere / _loader.
   await Promise.all(primitives.map(waitForModelReady));
 
+  // Setup animations for models that have animation enabled
+  primitives.forEach((model, index) => {
+    const definition = modelDefs[index];
+    if (definition.animation && model.activeAnimations) {
+      try {
+        // Calculate multiplier based on desired duration
+        // multiplier = 1.0 is native speed, higher = faster, lower = slower
+        const multiplier = definition.animationDuration 
+          ? 1.0 / definition.animationDuration 
+          : 1.0;
+        
+        model.activeAnimations.addAll({
+          loop: ModelAnimationLoop.REPEAT,
+          multiplier
+        });
+      } catch (e) {
+        console.warn(`Failed to add animation for model ${definition.fileName}:`, e);
+      }
+    }
+  });
+
   // Revert to configured visibility now that footprints have been extracted.
   primitives.forEach((p) => { p.show = visible; });
 
@@ -253,6 +307,7 @@ async function loadModelLayer(scene: Scene, layer: ThreedTileLayer) {
 
 async function loadTilesetLayer(
   scene: Scene,
+  map: OLMap,
   layer: ThreedTileLayer,
   cesiumIontoken: string
 ) {
@@ -269,6 +324,10 @@ async function loadTilesetLayer(
       tileset = await Cesium3DTileset.fromIonAssetId(url, {
         instanceFeatureIdLabel: layer.get('name'),
         dynamicScreenSpaceError: true,
+        skipLevelOfDetail: true,           // Skip intermediate LODs for faster load
+        preferLeaves: true,                 // Load leaf tiles first (highest detail)
+        cullRequestsWhileMoving: true,      // Don't request tiles while camera moves
+        cullRequestsWhileMovingMultiplier: 60, // More aggressive culling
         show: visible
       });
     } else if (url === 'OSM-Buildings' && cesiumIontoken) {
@@ -279,6 +338,10 @@ async function loadTilesetLayer(
       tileset = await Cesium3DTileset.fromUrl(url, {
         instanceFeatureIdLabel: layer.get('name'),
         dynamicScreenSpaceError: true,
+        skipLevelOfDetail: true,           // Skip intermediate LODs for faster load
+        preferLeaves: true,                 // Load leaf tiles first (highest detail)
+        cullRequestsWhileMoving: true,      // Don't request tiles while camera moves
+        cullRequestsWhileMovingMultiplier: 60, // More aggressive culling
         shadows:
           layer.get('showShadows') === false
             ? ShadowMode.RECEIVE_ONLY
@@ -298,6 +361,51 @@ async function loadTilesetLayer(
     added.style = new Cesium3DTileStyle(
       style && style !== 'default' ? { ...style, show } : { color: DEFAULT_TILE_STYLE, show }
     );
+
+    // Apply roof color shader if enabled
+    const roofColor = layer.get('roofColor') as string | undefined;
+    if (roofColor) {
+      const normalThreshold = (layer.get('roofNormalThreshold') as number | undefined) ?? 0.7;
+      
+      if (roofColor.toLowerCase() === 'sample') {
+        // Check for pre-generated data first
+        const roofColorData = layer.get('roofColorData') as string | undefined;
+        
+        if (roofColorData) {
+          // Load pre-generated data (no WMS fetch needed)
+          loadRoofColorData(roofColorData).then(data => {
+            if (data) {
+              added.customShader = createOrtofotoRoofColorShader(data, normalThreshold);
+            } else {
+              console.warn(`roofColor: Failed to load pre-generated data from "${roofColorData}"`);
+              added.customShader = createSolidRoofColorShader('#808080', normalThreshold);
+            }
+          });
+        } else {
+          // Sample colors from ortofoto WMS with LOD support
+          const roofColorLayer = layer.get('roofColorLayer') as string | undefined;
+          const lodDistance = (layer.get('roofColorLodDistance') as number | undefined) ?? 4000;
+          const highResSize = (layer.get('roofColorImageSize') as number | undefined) ?? 2048;
+          const fetchRadius = (layer.get('roofColorFetchRadius') as number | undefined) ?? 600;
+          
+          if (roofColorLayer) {
+            const wmsInfo = getWmsLayerInfo(map, roofColorLayer);
+            if (wmsInfo) {
+              setupLodRoofColor(scene, added, normalThreshold, wmsInfo.url, wmsInfo.layers, lodDistance, highResSize, fetchRadius);
+            } else {
+              console.warn(`roofColor: Could not find WMS layer "${roofColorLayer}"`);
+              added.customShader = createSolidRoofColorShader('#808080', normalThreshold);
+            }
+          } else {
+            console.warn('roofColor: "sample" mode requires roofColorLayer or roofColorData');
+            added.customShader = createSolidRoofColorShader('#808080', normalThreshold);
+          }
+        }
+      } else {
+        // Solid color - parse hex RGB
+        added.customShader = createSolidRoofColorShader(roofColor, normalThreshold);
+      }
+    }
   } catch (err) {
     console.error('Error loading 3D Tileset:', err);
   }
@@ -404,32 +512,27 @@ function toFiniteNumber(value: unknown): number | undefined {
  */
 function extractFootprintFromModel(model: Model): Cartesian3[] | null {
   try {
-    // Already world-space after model.ready — do NOT apply modelMatrix again.
     const worldBS = model.boundingSphere;
-    if (worldBS.radius <= 0) {
-      console.warn('[extractFootprintFromModel] bounding sphere radius = 0');
-      return null;
-    }
+    if (worldBS.radius <= 0) return null;
 
-    const center = Cartographic.fromCartesian(worldBS.center);
+    // Use scratch cartographic to avoid allocation
+    const center = Cartographic.fromCartesian(worldBS.center, Ellipsoid.WGS84, scratchCartographic);
     if (!center) return null;
 
-    const lat = (center.latitude * 180) / Math.PI;
-    const lng = (center.longitude * 180) / Math.PI;
+    const lat = center.latitude * RAD_TO_DEG;
+    const lng = center.longitude * RAD_TO_DEG;
     const latDelta = worldBS.radius / 111320;
     const lngDelta = worldBS.radius / (111320 * Math.cos(center.latitude));
 
-    // Single pass — no intermediate [number, number][] array needed.
-    return Array.from({ length: 8 }, (_, a) => {
-      const angle = (a * Math.PI * 2) / 8;
-      return Cartesian3.fromDegrees(
-        lng + lngDelta * Math.cos(angle),
-        lat + latDelta * Math.sin(angle),
+    // Use precomputed sin/cos for octagon angles
+    return OCTAGON_COS.map((cos, i) => 
+      Cartesian3.fromDegrees(
+        lng + lngDelta * cos,
+        lat + latDelta * OCTAGON_SIN[i],
         0
-      );
-    });
-  } catch (e) {
-    console.warn('[extractFootprintFromModel] exception:', e);
+      )
+    );
+  } catch {
     return null;
   }
 }
@@ -440,20 +543,24 @@ function extractFootprintFromModel(model: Model): Cartesian3[] | null {
  * along the vector centroid→vertex.
  */
 function bufferPositions(positions: Cartesian3[], bufferMeters: number): Cartesian3[] {
-  // Mutate acc in-place to avoid allocating a new Cartesian3 on every iteration.
-  const centroid = positions.reduce(
-    (acc, p) => Cartesian3.add(acc, p, acc),
-    new Cartesian3()
-  );
-  Cartesian3.divideByScalar(centroid, positions.length, centroid);
+  // Early return if no buffering needed
+  if (bufferMeters === 0) return positions;
+  
+  // Compute centroid using scratch object
+  Cartesian3.clone(Cartesian3.ZERO, scratchCartesian3A);
+  for (let i = 0; i < positions.length; i++) {
+    Cartesian3.add(scratchCartesian3A, positions[i], scratchCartesian3A);
+  }
+  Cartesian3.divideByScalar(scratchCartesian3A, positions.length, scratchCartesian3A);
+  const centroid = Cartesian3.clone(scratchCartesian3A);
 
   return positions.map((p) => {
-    const dir = Cartesian3.subtract(p, centroid, new Cartesian3());
-    const dist = Cartesian3.magnitude(dir);
+    Cartesian3.subtract(p, centroid, scratchCartesian3B);
+    const dist = Cartesian3.magnitude(scratchCartesian3B);
     if (dist === 0) return Cartesian3.clone(p);
-    Cartesian3.normalize(dir, dir);
-    Cartesian3.multiplyByScalar(dir, dist + bufferMeters, dir);
-    return Cartesian3.add(centroid, dir, new Cartesian3());
+    Cartesian3.normalize(scratchCartesian3B, scratchCartesian3B);
+    Cartesian3.multiplyByScalar(scratchCartesian3B, dist + bufferMeters, scratchCartesian3B);
+    return Cartesian3.add(centroid, scratchCartesian3B, new Cartesian3());
   });
 }
 

@@ -20,6 +20,19 @@ export interface DrawToolOptions {
   };
 }
 
+export interface DirectCesiumLayerConfig {
+  /** Layer name or id to match in OL map */
+  layerName: string;
+  /** Optional: override WMS URL */
+  url?: string;
+  /** Optional: override WMS layers param */
+  layers?: string;
+  /** Optional: image format (default: image/jpeg) */
+  format?: string;
+  /** Optional: maximum imagery level */
+  maximumLevel?: number;
+}
+
 export interface GlobeOptions {
   target?: string;
   globeOnStart?: boolean;
@@ -41,6 +54,14 @@ export interface GlobeOptions {
   cesiumIonassetIdTerrain?: number;
   gltf?: GLTFAssetOptions[];
   deactivateControls?: string[];
+  /** Layers to bypass OLImageryProvider for faster loading (use native Cesium WMS) */
+  directCesiumLayers?: DirectCesiumLayerConfig[];
+  /**
+   * CSS selectors for 2D controls/tools to hide when globe (3D) is active.
+   * Example: ['.o-measure', '.o-draw', '#myTool']
+   * These will be hidden in 3D mode and shown in 2D mode.
+   */
+  hide2DControlsInGlobe?: string[];
 }
 
 export interface GLTFAssetOptions {
@@ -76,6 +97,8 @@ export interface ResolvedGlobeOptions {
   cesiumIonassetIdTerrain: number | undefined;
   gltf: GLTFAssetOptions[] | undefined;
   deactivateControls: string[];
+  directCesiumLayers?: DirectCesiumLayerConfig[];
+  hide2DControlsInGlobe: string[];
   // Parsed
   drawToolConfig: DrawToolOptions;
 }
@@ -99,6 +122,7 @@ const DEFAULT_OPTIONS: Omit<ResolvedGlobeOptions, 'target' | 'cesiumTerrainProvi
   resolutionScale: typeof window !== 'undefined' ? window.devicePixelRatio : 1,
   settings: {},
   deactivateControls: [],
+  hide2DControlsInGlobe: [],
 };
 
 const DEFAULT_SHADOW_SETTINGS: ShadowSettings = {

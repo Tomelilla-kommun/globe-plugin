@@ -55,6 +55,10 @@ export interface ModelDefinition {
   rotPitch?: number;
   rotRoll?: number;
   footprint?: [number, number][];
+  /** Enable animation playback for this model */
+  animation?: boolean;
+  /** Duration in seconds for one complete animation loop. If not specified, uses model's native speed. */
+  animationDuration?: number;
 }
 
 export interface ThreedTileLayer {

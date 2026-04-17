@@ -77,6 +77,11 @@ export const GLOBE_ICONS: Record<string, SvgIconDef> = {
     viewBox: '0 0 24 24',
     svg: '<path d="M14.12,10H19V8.2H15.38L13.38,4.87C13.08,4.37 12.54,4.03 11.92,4.03C11.74,4.03 11.58,4.06 11.42,4.11L6,5.8V11H7.8V7.33L9.91,6.67L6,22H7.8L10.67,13.89L13,17V22H14.8V15.59L12.31,11.05L13.04,8.18M14,3.8C15,3.8 15.8,3 15.8,2C15.8,1 15,0.2 14,0.2C13,0.2 12.2,1 12.2,2C12.2,3 13,3.8 14,3.8Z"/>',
   },
+  footprint: {
+    id: 'ic_footprint_24px',
+    viewBox: '0 0 25 25',
+    svg: '<ellipse cx="7" cy="4" rx="1.5" ry="2"/><ellipse cx="10.5" cy="3" rx="1.5" ry="2.2"/><ellipse cx="14" cy="3.5" rx="1.4" ry="2"/><ellipse cx="17" cy="4.5" rx="1.3" ry="1.8"/><ellipse cx="19.5" cy="6" rx="1.2" ry="1.6"/><ellipse cx="12.5" cy="11" rx="7" ry="5"/><ellipse cx="10" cy="18" rx="4.5" ry="6"/>',
+  },
 };
 
 // ============================================================================
@@ -149,8 +154,8 @@ export function initializeSvgIcons(trackNode: (node: HTMLElement) => HTMLElement
   const wrapper = getOrCreateSpriteWrapper(trackNode);
   const spriteSvg = getOrCreateSpriteSvg(wrapper);
   
-  Object.values(GLOBE_ICONS).forEach(icon => {
-    ensureSymbol(spriteSvg, icon);
+  Object.keys(GLOBE_ICONS).forEach(key => {
+    ensureSymbol(spriteSvg, GLOBE_ICONS[key]);
   });
 }
 

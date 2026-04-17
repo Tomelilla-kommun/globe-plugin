@@ -224,6 +224,27 @@ To add glb/gltf models, use the example below. Several models can be added insid
 }
 ```
 
+#### Model animation options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `animation` | boolean | `false` | Enable animation playback for this model |
+| `animationDuration` | number | (native speed) | Duration in seconds for one complete animation loop |
+
+**Example with animation:**
+```json
+{
+    "fileName": "windmill.glb",
+    "lat": 55.547,
+    "lng": 13.949,
+    "height": 66.0,
+    "animation": true,
+    "animationDuration": 5
+}
+```
+
+This plays the model's animation, completing one full loop every 5 seconds. If `animationDuration` is omitted, the animation plays at its native speed.
+
 ### Extruded 2D-layer
 
 To add 2D data as 3D extruded objects, add the layer as shown below.
@@ -301,7 +322,17 @@ The 3D Measure tool provides four measurement modes:
 | **Distance** | Measure 3D distance between two points on terrain or 3D objects |
 | **Height** | Measure vertical height difference between two points |
 | **Footprint** | Measure horizontal projected area (like looking straight down) - useful for land plots and building footprints |
-| **3D Surface** | Measure true 3D surface area - useful for roofs, walls, slopes, and terrain |
+| **Surface** | Measure true surface area - useful for roofs, walls, slopes, and terrain |
+
+#### Footprint vs Surface Area
+
+| Tool | What it measures | Example (10×10m roof at 45° pitch) |
+|------|------------------|-------------------------------------|
+| **Footprint** | Horizontal projection — the "shadow" area as seen from above | ~100 m² |
+| **Surface** | True 3D surface area — the actual tilted/curved surface | ~141 m² |
+
+**Use Footprint for:** Land parcels, building coverage, floor plans, zoning calculations  
+**Use Surface for:** Roofing materials, painting walls, grass seed for slopes, actual material estimates
 
 To use:
 1. Select measurement mode from the toolbar.

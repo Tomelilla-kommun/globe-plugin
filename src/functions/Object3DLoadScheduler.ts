@@ -11,6 +11,8 @@ export interface ObjectMeta {
   rot: number;
   url: string;
   animated?: boolean;
+  /** Duration in seconds for one complete animation loop. If not specified, uses model's native speed. */
+  animationDuration?: number;
 }
 
 /**
@@ -97,11 +99,13 @@ export class Object3DLoadScheduler {
 
       if (meta.animated) {
         const offset = Math.random() * 60, t0 = this.t0;
+        // Calculate multiplier: if animationDuration is set, use 1/duration to control speed
+        const multiplier = meta.animationDuration ? 1.0 / meta.animationDuration : 1.0;
         model.readyEvent.addEventListener(() => {
           model.activeAnimations.addAll({
             loop: ModelAnimationLoop.REPEAT,
-            multiplier: 1.0,
-            animationTime: (d: number) => ((performance.now() - t0) / 1000 + offset) % d
+            multiplier,
+            animationTime: (d: number) => ((performance.now() - t0) / 1000 * multiplier + offset) % d
           });
           this.animated.push({ model, offset });
         });

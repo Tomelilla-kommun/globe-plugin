@@ -24,11 +24,12 @@ import { threedtile } from './layer/layerhelper';
 import quickTimePicker from './functions/quickTimePicker';
 import timeSetter from './functions/timeSetter';
 import ViewShed from './functions/ViewShed';
-import StreetView from './functions/StreetView';
+import StreetView, { forceExitStreetMode } from './functions/StreetView';
 import CameraControls from './functions/CameraControls';
 import dynamicResolutionScaling from './functions/dynamicResolutionScaling';
 import patchCollections from './functions/patchCollections';
 import getFeatureInfo from './functions/featureinfo';
+import { setupDirectCesiumImagery } from './functions/directCesiumImagery';
 
 // Globe module imports
 import { CleanupFn, GlobeSettings } from './globe/types';
@@ -54,7 +55,8 @@ import {
 import { streetViewHtml, cameraControlsHtml } from './uiTemplates';
 
 // Re-export types
-export type { DrawToolExportOptions, DrawToolOptions, GlobeOptions } from './globe/configValidation';
+export type { DrawToolExportOptions, DrawToolOptions, GlobeOptions, DirectCesiumLayerConfig } from './globe/configValidation';
+import type { DirectCesiumLayerConfig } from './globe/configValidation';
 
 // ============================================================================
 // Types
@@ -81,6 +83,8 @@ interface GlobeOptionsInput {
   cesiumIonassetIdTerrain?: number;
   gltf?: any[];
   deactivateControls?: string[];
+  /** Layers to bypass OLImageryProvider for faster loading (use native Cesium WMS) */
+  directCesiumLayers?: DirectCesiumLayerConfig[];
 }
 
 // ============================================================================
@@ -235,6 +239,33 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
   }
 
   // ============================================================================
+  // 2D/3D Control Visibility Management
+  // ============================================================================
+
+  /**
+   * Toggles visibility of 2D controls based on globe state.
+   * When globe (3D) is active, hides 2D controls.
+   * When globe is inactive (2D mode), shows all 2D controls.
+   */
+  const toggle2DControls = (globeActive: boolean): void => {
+    const hide2DSelectors = config.hide2DControlsInGlobe;
+
+    if (!hide2DSelectors || hide2DSelectors.length === 0) return;
+
+    hide2DSelectors.forEach(selector => {
+      try {
+        const elements = document.querySelectorAll<HTMLElement>(selector);
+        elements.forEach(el => {
+          // Hide in 3D mode, show in 2D mode
+          el.style.display = globeActive ? 'none' : '';
+        });
+      } catch (e) {
+        console.warn(`[Globe] Invalid selector for hide2DControlsInGlobe: ${selector}`, e);
+      }
+    });
+  };
+
+  // ============================================================================
   // Globe Toggle Logic
   // ============================================================================
 
@@ -255,6 +286,11 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
 
     const active = isGlobeActive(oGlobe);
 
+    // Exit street mode when switching to 2D
+    if (!active) {
+      forceExitStreetMode();
+    }
+
     // Toggle UI visibility
     const updates: [string | null, string, string][] = [
       ['streetView', active ? 'flex' : 'none', 'flex'],
@@ -272,6 +308,9 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
 
     const footer = document.getElementsByClassName('o-footer-middle')[0] as HTMLElement;
     if (footer) footer.style.paddingLeft = active ? '5px' : '0px';
+
+    // Toggle 2D controls visibility based on globe state
+    toggle2DControls(active);
   };
 
   // ============================================================================
@@ -383,6 +422,19 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
       }
     },
 
+    [BUTTON_IDS.MEASURE_3D]: (btn) => {
+      if (!measureUi) return;
+      const active = !btn.isActive();
+      btn.setActive(active);
+      if (active) {
+        measureUi.mountMeasureToolbarIfNeeded();
+        measureUi.setMeasureToolbarVisible(true);
+      } else {
+        measureUi.setMeasureToolbarVisible(false);
+      }
+      requestSceneRender();
+    },
+
     [BUTTON_IDS.FX]: (btn) => {
       if (!scene?.shadowMap) return;
       const active = !btn.isActive();
@@ -481,38 +533,6 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
     };
   };
 
-  const addMeasureTool = (): CleanupFn | void => {
-    if (!measure) return;
-
-    const button = document.getElementsByClassName('o-measure')[0] as HTMLElement;
-    if (!button) return;
-
-    const originalClick = button.onclick;
-    button.onclick = null;
-
-    const onClick = (e: Event) => {
-      if (!isGlobeActive(oGlobe)) {
-        originalClick?.call(button, e as any);
-        return;
-      }
-      stopDomEvent(e);
-      if (!measureUi) return;
-      const visible = measureUi.isMeasureToolbarVisible();
-      measureUi.setMeasureToolbarVisible(!visible);
-      button.classList.toggle('active', !visible);
-      requestSceneRender();
-    };
-
-    button.addEventListener('click', onClick, true);
-
-    return () => {
-      button.removeEventListener('click', onClick, true);
-      measureUi?.setMeasureToolbarVisible(false);
-      button.onclick = originalClick ?? null;
-      button.classList.remove('active');
-    };
-  };
-
   const activeGlobeOnStart = (): void => {
     if (!globeOnStart || hasActivatedOnStart || !oGlobe) return;
     hasActivatedOnStart = true;
@@ -553,6 +573,7 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
         drawTool: !!drawTool,
         quickTimeShadowPicker,
         fx,
+        measure,
       });
 
       buttonConfigs.forEach(cfg => {
@@ -594,10 +615,34 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
           const val = (fp?.input as HTMLInputElement)?.value;
           return Cesium.JulianDate.fromDate(val ? new Date(val) : new Date());
         },
+        sceneOptions: {
+          contextOptions: {
+            webgl: {
+              preserveDrawingBuffer: true
+            }
+          }
+        }
       });
 
       scene = oGlobe.getCesiumScene();
       window.oGlobe = oGlobe;
+
+      // Setup direct Cesium imagery layers (bypasses OLImageryProvider for speed)
+      // Read from config (merged from indexJson["3D"])
+      const directLayers = config.directCesiumLayers;
+      if (directLayers?.length) {
+        // Get projection extent to limit tile fetching
+        const view = map.getView();
+        const projection = view.getProjection();
+        const projExtent = projection.getExtent();
+        const projCode = projection.getCode();
+        
+        const directImageryCleanup = setupDirectCesiumImagery(map, scene, directLayers, {
+          extent: projExtent ? [projExtent[0], projExtent[1], projExtent[2], projExtent[3]] : undefined,
+          crs: projCode
+        });
+        registerCleanup(directImageryCleanup);
+      }
 
       // Configure rendering
       scene.requestRenderMode = true;
@@ -656,7 +701,6 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
       initializeSvgIcons(trackNode);
       setActiveControls(oGlobe, viewer);
       registerOptionalCleanup(addPickedFeatureStyle(cesiumHandler));
-      registerOptionalCleanup(addMeasureTool());
 
       // Load shared polygons from URL
       try {

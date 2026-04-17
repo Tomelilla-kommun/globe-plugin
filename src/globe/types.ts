@@ -26,9 +26,10 @@ export interface ShadowSettings {
 export interface GlobeSettings {
   enableAtmosphere?: boolean;
   enableFog?: boolean;
+  enableLighting?: boolean;
+  enableGroundAtmosphere?: boolean;
   shadows?: ShadowSettings;
   depthTestAgainstTerrain?: boolean;
-  showGroundAtmosphere?: boolean;
   skyBox?: SkyBoxSettings | false;
 }
 

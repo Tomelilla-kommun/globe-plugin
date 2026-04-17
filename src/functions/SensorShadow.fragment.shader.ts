@@ -51,10 +51,10 @@ void main() {
         return;
     }
 
-    // shadow parameters
+    // shadow parameters - increased bias to reduce flickering on slopes
     czm_shadowParameters shadowParams;
     shadowParams.texelStepSize = shadowMap_texelSizeDepthBiasAndNormalShadingSmooth.xy;
-    shadowParams.depthBias = shadowMap_texelSizeDepthBiasAndNormalShadingSmooth.z * max(screenDepth * 0.01, 1.0);
+    shadowParams.depthBias = shadowMap_texelSizeDepthBiasAndNormalShadingSmooth.z * max(screenDepth * 0.02, 2.0);
     shadowParams.normalShadingSmooth = shadowMap_texelSizeDepthBiasAndNormalShadingSmooth.w;
     shadowParams.darkness = shadowMap_normalOffsetScaleDistanceMaxDistanceAndDarkness.w;
 
@@ -81,25 +81,19 @@ void main() {
     shadowParams.depth = shadowPos.z;
     shadowParams.nDotL = 1.0;
 
-    float u = smoothstep(0.0, 0.01, shadowPos.x) * smoothstep(1.0, 0.99, 1.0 - shadowPos.x);
-    float v = smoothstep(0.0, 0.01, shadowPos.y) * smoothstep(1.0, 0.99, 1.0 - shadowPos.y);
+    float u = smoothstep(0.0, 0.02, shadowPos.x) * smoothstep(1.0, 0.98, 1.0 - shadowPos.x);
+    float v = smoothstep(0.0, 0.02, shadowPos.y) * smoothstep(1.0, 0.98, 1.0 - shadowPos.y);
     float edgeFade = min(u, v);
-
-    // percentShade *= edgeFade;
 
     float visibility = czm_shadowVisibility(shadowMap, shadowParams);
 
-    // GREEN (visible)
-    if (visibility >= 0.7) {
-        float test = percentShade * edgeFade;
-        FragColor = mix(color, vec4(viewArea_color, 1.0), test);
-        return;
-    }
+    // Smooth blending between visible (green) and shadow (red) to reduce flicker
+    // Map visibility [0.3, 0.8] to shadow factor [1, 0] with smooth transition
+    float shadowFactor = 1.0 - smoothstep(0.3, 0.8, visibility);
 
-    // SHADOW (occluded) - compute world distance and map to meters-based fade
-    float distFromView = length(fragWC.xyz - lightWC.xyz); // meters
+    // SHADOW distance-based fade
+    float distFromView = length(fragWC.xyz - lightWC.xyz);
 
-    // if user set invalid range, fallback to using view_distance
     float start = shadowDepthStart;
     float end = shadowDepthEnd;
     if (end <= start + 1e-6) {
@@ -108,9 +102,16 @@ void main() {
     }
 
     float t = clamp((start - distFromView) / (start - end), 0.5, 1.0);
-    float salpha = shadowAlpha * smoothstep(0.0, 1.0, t);
-    salpha *= edgeFade;
+    float distFade = smoothstep(0.0, 1.0, t);
 
-    FragColor = mix(color, vec4(shadowArea_color, 1.0), salpha);
+    // Blend green and red based on visibility (soft transition instead of hard cutoff)
+    float greenAlpha = percentShade * edgeFade * (1.0 - shadowFactor);
+    float redAlpha = shadowAlpha * distFade * edgeFade * shadowFactor;
+
+    // Composite: apply green tint, then red tint
+    vec3 tinted = mix(color.rgb, viewArea_color, greenAlpha);
+    tinted = mix(tinted, shadowArea_color, redAlpha);
+
+    FragColor = vec4(tinted, color.a);
 }
 `;

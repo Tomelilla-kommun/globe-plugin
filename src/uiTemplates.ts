@@ -25,7 +25,7 @@ export const measureToolbarHtml = () => `
     <button id="measure-footprint" class="padding-small icon-smaller round light box-shadow relative o-tooltip" aria-label="Fotavtryck" tabindex="0" title="Mät fotavtryck - horisontell projektion (Vänsterklick: lägg till punkter, Högerklick: avsluta)">
       <span class="icon">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="hsl(0, 0%, 29%)">
-          <use xlink:href="#o_polygon_24px"></use>
+          <use xlink:href="#ic_footprint_24px"></use>
         </svg>
       </span>
       <span data-tooltip="Fotavtryck" data-placement="south"></span>
@@ -37,7 +37,7 @@ export const measureToolbarHtml = () => `
           <use xlink:href="#o_polygon_24px"></use>
         </svg>
       </span>
-      <span data-tooltip="3D Yta" data-placement="south"></span>
+      <span data-tooltip="Yta" data-placement="south"></span>
     </button>
 
     <div style="width: 1px; background: #ccc; margin: 4px 2px;"></div>
