@@ -10,8 +10,7 @@ const DEFAULT_TILE_STYLE = "color('white', 1)";
 /** Set to true to visualize clipping polygons as yellow overlays */
 const DEBUG_SHOW_CLIPPING_POLYGONS = false;
 
-/** Set to true to log instance hiding details */
-const DEBUG_INSTANCE_HIDING = true;
+
 
 // ============================================================================
 // Types
@@ -28,13 +27,6 @@ export interface MaskConfig {
    * Default: false
    */
   skipTileVisibilityMasking?: boolean;
-  /**
-   * For instanced tilesets (I3DM) like trees: skip ClippingPolygons entirely and use
-   * per-instance hiding based on show property. This is more reliable for instanced content
-   * but requires iterating through all features.
-   * Default: false
-   */
-  useInstanceHiding?: boolean;
 }
 
 export interface ParsedMaskConfig {
@@ -42,7 +34,6 @@ export interface ParsedMaskConfig {
   removeIntersecting: boolean;
   polygon?: string;
   skipTileVisibilityMasking: boolean;
-  useInstanceHiding: boolean;
 }
 
 export interface ModelDefinition {
@@ -73,8 +64,7 @@ export interface ThreedTileLayer {
   OwnMaskPolygons?: Map<string, LngLat[][]>;
   ExcludedFeatureIds?: Map<string, Set<string>>;
   TileListenerRemovers?: Map<string, () => void>;
-  /** Stores tileVisible listener removers for instance hiding */
-  InstanceHidingRemovers?: Map<string, () => void>;
+
   AccumulatedMaskPolygons?: Array<Array<LngLat>>;
   VisibilityMaskingSetup?: boolean;
   /** Tracks whether this layer's mask is currently enabled */
@@ -94,13 +84,12 @@ const LAT_PROPS = ['latitude', 'lat', 'y', 'Latitude', 'LAT', 'Y'];
 const LNG_PROPS = ['longitude', 'lng', 'lon', 'x', 'Longitude', 'LNG', 'LON', 'X'];
 
 export function parseMaskConfig(value: number | MaskConfig): ParsedMaskConfig {
-  if (typeof value === 'number') return { buffer: value, removeIntersecting: false, skipTileVisibilityMasking: false, useInstanceHiding: false };
+  if (typeof value === 'number') return { buffer: value, removeIntersecting: false, skipTileVisibilityMasking: false };
   return { 
     buffer: value.buffer ?? 0, 
     removeIntersecting: value.removeIntersecting ?? false, 
     polygon: value.polygon,
-    skipTileVisibilityMasking: value.skipTileVisibilityMasking ?? false,
-    useInstanceHiding: value.useInstanceHiding ?? false
+    skipTileVisibilityMasking: value.skipTileVisibilityMasking ?? false
   };
 }
 
@@ -328,23 +317,53 @@ export function modelFootprint(
 // Tile Visibility Masking
 // ============================================================================
 
-/** Get tile center from various sources */
+/** Get tile center from bounding volume or transform */
 function getTileCenter(tile: any): LngLat | null {
   const bv = tile.boundingVolume;
-  if (bv?.boundingSphere) {
-    const c = Cartographic.fromCartesian(bv.boundingSphere.center);
+  
+  // Try bounding sphere center
+  const sphereCenter = bv?.boundingSphere?.center ?? bv?.center;
+  if (sphereCenter) {
+    const c = Cartographic.fromCartesian(sphereCenter);
     if (c) return cartographicToLngLat(c);
   }
-  if ((bv as any)?.center) {
-    const c = Cartographic.fromCartesian((bv as any).center);
-    if (c) return cartographicToLngLat(c);
-  }
+  
+  // Fall back to tile transform
   const t = tile._transform;
   if (t) {
     const c = Cartographic.fromCartesian(Cartesian3.fromElements(t[12], t[13], t[14], new Cartesian3()));
     if (c) return cartographicToLngLat(c);
   }
+  
   return null;
+}
+
+/** Check if a point should be hidden by any mask polygon */
+function isInsideMask(center: LngLat, polygons: LngLat[][]): boolean {
+  for (const polygon of polygons) {
+    if (pointInPolygon2D(center, polygon)) return true;
+  }
+  return false;
+}
+
+/** Traverse all tiles in a tileset and apply a callback */
+function forEachTile(tileset: Cesium3DTileset, callback: (tile: any) => void): void {
+  const ts = tileset as any;
+  const root = ts.root ?? ts._root;
+  if (!root) return;
+  
+  const stack = [root];
+  while (stack.length > 0) {
+    const tile = stack.pop();
+    if (!tile) continue;
+    
+    callback(tile);
+    
+    const children = tile.children ?? tile._children;
+    if (children && Array.isArray(children)) {
+      stack.push(...children);
+    }
+  }
 }
 
 /**
@@ -364,517 +383,41 @@ function setupTileVisibilityMasking(
 
   tileset.tileVisible.addEventListener((tile) => {
     if (!tile.content) return;
+    
     const polygons = tilesetLayer.AccumulatedMaskPolygons;
-    if (!polygons?.length) return;
-
-    const center = getTileCenter(tile);
-    if (!center) return;
-
-    for (const polygon of polygons) {
-      if (pointInPolygon2D(center, polygon)) {
-        tile.content.show = false;
-        return;
-      }
-    }
-    tile.content.show = true;
-  });
-}
-
-// ============================================================================
-// Instance Hiding (for I3DM/composite tilesets)
-// ============================================================================
-
-/**
- * Get the world position of a feature/instance, handling I3DM instanced content.
- * Returns position as Cartesian3 or null if not determinable.
- */
-function getFeatureWorldPosition(feature: Cesium3DTileFeature, content: Cesium3DTileContent): Cartesian3 | null {
-  try {
-    const f = feature as any;
-    const c = f._content ?? f.content ?? content;
-    
-    // For I3DM: try various ways to get the instance position
-    
-    // Method 1: Check for computed bounding volume per feature
-    if (f._boundingVolume?.boundingSphere?.center) {
-      return f._boundingVolume.boundingSphere.center;
-    }
-    
-    // Method 2: Try to compute from the tile's model and instance data
-    const model = c?._model;
-    if (model && f._batchId !== undefined) {
-      // Check for instancing data
-      const structuralMetadata = c._structuralMetadata ?? model._structuralMetadata;
-      if (structuralMetadata) {
-        // Try to get position from EXT_mesh_gpu_instancing or similar
-        const table = structuralMetadata._propertyTables?.[0];
-        if (table) {
-          const translation = table.getProperty?.(f._batchId, 'TRANSLATION');
-          if (translation && translation.length >= 3) {
-            // Translation is relative to tile origin
-            const tileTransform = c._tile?.computedTransform;
-            if (tileTransform) {
-              const localPos = Cartesian3.fromArray(translation);
-              return Matrix4.multiplyByPoint(tileTransform, localPos, new Cartesian3());
-            }
-          }
-        }
-      }
-      
-      // Method 3: Check for instance transforms array
-      if (c._instances) {
-        const instanceTransform = c._instances[f._batchId]?.transform;
-        if (instanceTransform) {
-          return Cartesian3.fromElements(
-            instanceTransform[12],
-            instanceTransform[13],
-            instanceTransform[14],
-            new Cartesian3()
-          );
-        }
-      }
-    }
-    
-    // Method 4: For composite tiles, try to get from the individual primitive
-    if (c._contents) {
-      for (const subContent of c._contents) {
-        const pos = getFeatureWorldPosition(feature, subContent);
-        if (pos) return pos;
-      }
-    }
-    
-    // Method 5: Fall back to tile center with some offset based on batch ID
-    // This is a last resort - not ideal but better than nothing
-    const tile = c._tile ?? c.tile;
-    if (tile?.boundingSphere?.center && f._batchId !== undefined) {
-      // Use tile center as approximation
-      return tile.boundingSphere.center;
-    }
-    
-  } catch (e) {
-    // Ignore errors in position extraction
-  }
-  return null;
-}
-
-/**
- * Set up per-instance hiding for instanced tilesets.
- * Uses tileVisible event to check and hide individual features within each tile.
- * Handles composite tiles by recursively processing inner contents.
- */
-function setupInstanceHiding(
-  tileset: Cesium3DTileset,
-  maskPolygons: LngLat[][],
-  layer: ThreedTileLayer,
-  tilesetName: string
-): () => void {
-  let debugLogCount = 0;
-  const MAX_DEBUG_LOGS = 10;
-  
-  const processContent = (content: any, depth = 0, parentUrl = ''): void => {
-    if (!content) return;
-    
-    const contentUrl = content._url ?? content.url ?? content._resource?.url ?? '';
-    const shouldDebug = DEBUG_INSTANCE_HIDING && debugLogCount < MAX_DEBUG_LOGS;
-    
-    // For composite tiles, process inner contents recursively FIRST
-    const innerContents = content._contents ?? content.innerContents ?? content._innerContents;
-    if (innerContents && Array.isArray(innerContents) && innerContents.length > 0) {
-      if (shouldDebug) {
-        console.log(`[tileClipping] Composite tile at depth ${depth} with ${innerContents.length} inner contents`);
-        debugLogCount++;
-      }
-      for (let idx = 0; idx < innerContents.length; idx++) {
-        const inner = innerContents[idx];
-        processContent(inner, depth + 1, `composite[${idx}]`);
-      }
-      // DO NOT process features at the composite level - only process inner contents
-      // The composite's featuresLength sums all inner content features, but getFeature
-      // returns features that may belong to different inner models
+    if (!polygons?.length) {
+      tile.content.show = true;
       return;
     }
-    
-    // Process features at this content level (only for non-composite/leaf content)
-    const featuresLength = content.featuresLength ?? 0;
-    
-    if (shouldDebug && featuresLength > 0) {
-      console.log(`[tileClipping] Leaf content at depth ${depth} (${parentUrl || contentUrl || 'unknown'}): ${featuresLength} features`);
-      debugLogCount++;
-      
-      // Log model info
-      const model = content._model ?? content.model;
-      if (model) {
-        const loaderComponents = model._loader?.components;
-        console.log(`[tileClipping] Model info:`, {
-          url: model._resource?.url ?? 'unknown',
-          hasInstancingTransforms: !!model._instancingTransforms,
-          hasTranslationBuffer: !!(model._instancingTranslationBuffer || model._translationBuffer),
-          hasSceneGraph: !!model._sceneGraph,
-          instanceCount: model._instanceCount ?? 'unknown',
-          loaderInstances: !!loaderComponents?.instances,
-          translationsLength: loaderComponents?.instances?.translations?.length ?? 0
-        });
-      }
-    }
-    
-    for (let i = 0; i < featuresLength; i++) {
-      const feature = content.getFeature?.(i);
-      if (!feature) continue;
-      
-      // Try multiple methods to get the feature position
-      let center: LngLat | null = null;
-      let method = '';
-      
-      // Method 1: getFeatureCenter (enhanced for I3DM)
-      center = getFeatureCenter(feature, content);
-      if (center) method = 'getFeatureCenter';
-      
-      // Method 2: Get world position and convert
-      if (!center) {
-        const worldPos = getFeatureWorldPosition(feature, content);
-        if (worldPos) {
-          const carto = Cartographic.fromCartesian(worldPos);
-          if (carto) {
-            center = { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-            method = 'getFeatureWorldPosition';
-          }
-        }
-      }
-      
-      // Method 3: Try to get position from the model's instancing data directly
-      if (!center) {
-        center = getInstancePositionFromModel(feature, content, i);
-        if (center) method = 'getInstancePositionFromModel';
-      }
-      
-      // Method 4: Try to get from the tile's computed transform directly
-      if (!center) {
-        const tile = (content as any)._tile ?? (content as any).tile;
-        if (tile?.computedTransform) {
-          // Get feature's local position if available, otherwise use tile origin
-          const batchId = (feature as any)._batchId ?? i;
-          center = getPositionFromTileTransform(content, tile, batchId);
-          if (center) method = 'tileTransform';
-        }
-      }
-      
-      if (shouldDebug && i < 3) {
-        console.log(`[tileClipping] Feature ${i} (batchId: ${(feature as any)._batchId}): center=${center ? `{lng:${center.lng.toFixed(6)}, lat:${center.lat.toFixed(6)}}` : 'null'} via ${method || 'none'}`);
-      }
-      
-      if (!center) {
-        if (shouldDebug && i === 0) {
-          console.log(`[tileClipping] WARNING: Could not get position for feature ${i}`);
-        }
-        continue;
-      }
-      
-      // Check if this feature falls within any mask polygon
-      let shouldHide = false;
-      for (const polygon of maskPolygons) {
-        if (pointInPolygon2D(center, polygon)) {
-          shouldHide = true;
-          break;
-        }
-      }
-      
-      // Hide or show the feature
-      feature.show = !shouldHide;
-    }
-  };
+
+    const center = getTileCenter(tile);
+    tile.content.show = !center || !isInsideMask(center, polygons);
+  });
+}
+
+/**
+ * Update visibility for all loaded tiles based on current mask polygons.
+ * Called when mask polygons change to update already-loaded tiles.
+ */
+function updateAllTileVisibility(tileset: Cesium3DTileset, maskPolygons: LngLat[][] | undefined): void {
+  const hasPolygons = maskPolygons && maskPolygons.length > 0;
   
-  const remover = tileset.tileVisible.addEventListener((tile) => {
+  forEachTile(tileset, (tile) => {
     if (!tile.content) return;
-    processContent(tile.content, 0, tile._contentResource?.url ?? '');
+    
+    if (!hasPolygons) {
+      tile.content.show = true;
+    } else {
+      const center = getTileCenter(tile);
+      tile.content.show = !center || !isInsideMask(center, maskPolygons);
+    }
   });
   
-  return remover;
-}
-
-/**
- * Try to get position from the tile's transform combined with local instance data.
- */
-function getPositionFromTileTransform(
-  content: any,
-  tile: any,
-  instanceIndex: number
-): LngLat | null {
-  try {
-    const model = content._model ?? content.model;
-    if (!model) return null;
-    
-    const tileTransform = tile.computedTransform ?? tile._computedTransform;
-    if (!tileTransform) return null;
-    
-    // Try to find instance translation data in various places
-    const sources = [
-      // EXT_mesh_gpu_instancing translations
-      model._loader?.components?.instances?.translations,
-      // glTF structural metadata
-      content._structuralMetadata?.propertyTables?.[0],
-      // Model instances
-      model._sceneGraph?.components?.instances?.translations,
-    ];
-    
-    for (const source of sources) {
-      if (!source) continue;
-      
-      // If it's a typed array or regular array
-      if (source.length && instanceIndex * 3 + 2 < source.length) {
-        const localPos = Cartesian3.fromElements(
-          source[instanceIndex * 3],
-          source[instanceIndex * 3 + 1],
-          source[instanceIndex * 3 + 2],
-          new Cartesian3()
-        );
-        
-        const worldPos = Matrix4.multiplyByPoint(tileTransform, localPos, new Cartesian3());
-        const carto = Cartographic.fromCartesian(worldPos);
-        if (carto) {
-          return { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-        }
-      }
-      
-      // If it's a property table with getProperty
-      if (typeof source.getProperty === 'function') {
-        const translation = source.getProperty(instanceIndex, 'TRANSLATION') ?? 
-                           source.getProperty(instanceIndex, 'translation');
-        if (translation && translation.length >= 3) {
-          const localPos = Cartesian3.fromArray(translation);
-          const worldPos = Matrix4.multiplyByPoint(tileTransform, localPos, new Cartesian3());
-          const carto = Cartographic.fromCartesian(worldPos);
-          if (carto) {
-            return { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-          }
-        }
-      }
-    }
-    
-    // Last resort: try to get from model's raw glTF data
-    if (model._loader?._gltfJson?.extensions?.EXT_mesh_gpu_instancing) {
-      // This would require more complex parsing...
-    }
-    
-  } catch (e) {
-    // Ignore
+  // Trigger style refresh for any tiles that load later
+  const ts = tileset as any;
+  if (typeof ts.makeStyleDirty === 'function') {
+    ts.makeStyleDirty();
   }
-  return null;
-}
-
-/**
- * Try to extract instance position from the model's GPU instancing data.
- * This handles EXT_mesh_gpu_instancing and similar extensions.
- */
-function getInstancePositionFromModel(
-  feature: Cesium3DTileFeature,
-  content: Cesium3DTileContent,
-  instanceIndex: number
-): LngLat | null {
-  try {
-    const f = feature as any;
-    const c = content as any;
-    const model = c._model ?? c.model;
-    
-    if (!model) return null;
-    
-    // Try to get the tile's computed transform
-    const tile = c._tile ?? c.tile;
-    const tileTransform = tile?.computedTransform ?? tile?._computedTransform;
-    
-    const batchId = f._batchId ?? instanceIndex;
-    
-    // Method 1: Check model._loader?.components?.instances
-    // This is where Cesium stores EXT_mesh_gpu_instancing data for glTF 2.0
-    const loaderComponents = model._loader?.components;
-    if (loaderComponents?.instances) {
-      const instances = loaderComponents.instances;
-      const translations = instances.translations;
-      if (translations && translations.length > batchId * 3 + 2) {
-        const localPos = Cartesian3.fromElements(
-          translations[batchId * 3],
-          translations[batchId * 3 + 1],
-          translations[batchId * 3 + 2],
-          new Cartesian3()
-        );
-        
-        let worldPos = localPos;
-        if (tileTransform) {
-          worldPos = Matrix4.multiplyByPoint(tileTransform, localPos, new Cartesian3());
-        }
-        
-        const carto = Cartographic.fromCartesian(worldPos);
-        if (carto) {
-          return { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-        }
-      }
-    }
-    
-    // Method 2: Check model._sceneGraph for runtime node instances
-    if (model._sceneGraph?._runtimeNodes) {
-      for (const node of model._sceneGraph._runtimeNodes) {
-        // Check instancing on the node
-        const nodeInstances = node._runtimeInstances ?? node._instances;
-        if (nodeInstances && nodeInstances.length > batchId) {
-          const instance = nodeInstances[batchId];
-          if (instance?.translation) {
-            let pos = instance.translation;
-            if (tileTransform) {
-              pos = Matrix4.multiplyByPoint(tileTransform, pos, new Cartesian3());
-            }
-            const carto = Cartographic.fromCartesian(pos);
-            if (carto) {
-              return { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-            }
-          }
-          if (instance?.transform) {
-            const t = instance.transform;
-            let pos: Cartesian3;
-            if (t instanceof Matrix4) {
-              pos = Matrix4.getTranslation(t, new Cartesian3());
-            } else if (Array.isArray(t) && t.length >= 16) {
-              pos = Cartesian3.fromElements(t[12], t[13], t[14], new Cartesian3());
-            } else {
-              continue;
-            }
-            if (tileTransform) {
-              pos = Matrix4.multiplyByPoint(tileTransform, pos, new Cartesian3());
-            }
-            const carto = Cartographic.fromCartesian(pos);
-            if (carto) {
-              return { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-            }
-          }
-        }
-        
-        // Also check for typed array translations
-        if (node._instancingTranslations) {
-          const translations = node._instancingTranslations;
-          if (translations.length > batchId * 3 + 2) {
-            const localPos = Cartesian3.fromElements(
-              translations[batchId * 3],
-              translations[batchId * 3 + 1],
-              translations[batchId * 3 + 2],
-              new Cartesian3()
-            );
-            
-            let worldPos = localPos;
-            if (tileTransform) {
-              worldPos = Matrix4.multiplyByPoint(tileTransform, localPos, new Cartesian3());
-            }
-            
-            const carto = Cartographic.fromCartesian(worldPos);
-            if (carto) {
-              return { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-            }
-          }
-        }
-      }
-    }
-    
-    // Method 3: Check model._instancingTransforms (array of matrices)
-    if (model._instancingTransforms) {
-      const transforms = model._instancingTransforms;
-      if (transforms[batchId]) {
-        const t = transforms[batchId];
-        // Extract translation from 4x4 matrix (column-major: indices 12, 13, 14)
-        let pos: Cartesian3;
-        if (Array.isArray(t)) {
-          pos = Cartesian3.fromElements(t[12], t[13], t[14], new Cartesian3());
-        } else if (t.translation) {
-          pos = t.translation;
-        } else if (t instanceof Matrix4) {
-          pos = Matrix4.getTranslation(t, new Cartesian3());
-        } else {
-          return null;
-        }
-        
-        // Transform to world coordinates if needed
-        if (tileTransform) {
-          pos = Matrix4.multiplyByPoint(tileTransform, pos, new Cartesian3());
-        }
-        
-        const carto = Cartographic.fromCartesian(pos);
-        if (carto) {
-          return { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-        }
-      }
-    }
-    
-    // Method 4: Check for instancingTranslationBuffer
-    if (model._instancingTranslationBuffer || model._translationBuffer) {
-      const buffer = model._instancingTranslationBuffer ?? model._translationBuffer;
-      // Each translation is 3 floats (x, y, z)
-      const offset = batchId * 3;
-      if (buffer.length > offset + 2) {
-        const localPos = Cartesian3.fromElements(buffer[offset], buffer[offset + 1], buffer[offset + 2], new Cartesian3());
-        
-        // Transform to world coordinates
-        let worldPos = localPos;
-        if (tileTransform) {
-          worldPos = Matrix4.multiplyByPoint(tileTransform, localPos, new Cartesian3());
-        }
-        
-        const carto = Cartographic.fromCartesian(worldPos);
-        if (carto) {
-          return { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-        }
-      }
-    }
-    
-    // Method 5: Check for feature tables (glTF-based / I3DM)
-    if (c._featureTable) {
-      const ft = c._featureTable;
-      
-      // Check for POSITION semantic
-      const positions = ft.getPropertyArray?.('POSITION') ?? ft._properties?.POSITION;
-      if (positions && positions.length > batchId * 3 + 2) {
-        const localPos = Cartesian3.fromElements(
-          positions[batchId * 3],
-          positions[batchId * 3 + 1],
-          positions[batchId * 3 + 2],
-          new Cartesian3()
-        );
-        
-        // Add RTC center if present
-        let worldPos = localPos;
-        const rtcCenter = c._rtcCenter ?? ft._rtcCenter;
-        if (rtcCenter) {
-          worldPos = Cartesian3.add(rtcCenter, localPos, new Cartesian3());
-        } else if (tileTransform) {
-          worldPos = Matrix4.multiplyByPoint(tileTransform, localPos, new Cartesian3());
-        }
-        
-        const carto = Cartographic.fromCartesian(worldPos);
-        if (carto) {
-          return { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-        }
-      }
-    }
-    
-    // Method 6: Try model.instances (older API)
-    if (model.instances && model.instances.length > batchId) {
-      const instance = model.instances[batchId];
-      if (instance?.modelMatrix) {
-        let pos = Cartesian3.fromElements(
-          instance.modelMatrix[12],
-          instance.modelMatrix[13],
-          instance.modelMatrix[14],
-          new Cartesian3()
-        );
-        if (tileTransform) {
-          pos = Matrix4.multiplyByPoint(tileTransform, pos, new Cartesian3());
-        }
-        const carto = Cartographic.fromCartesian(pos);
-        if (carto) {
-          return { lng: carto.longitude * RAD_TO_DEG, lat: carto.latitude * RAD_TO_DEG };
-        }
-      }
-    }
-    
-  } catch (e) {
-    // Ignore extraction errors
-  }
-  return null;
 }
 
 // ============================================================================
@@ -922,7 +465,6 @@ export async function applyMask(
   layer.TileListenerRemovers ??= new Map();
   layer.OwnClippingPolygons ??= new Map();
   layer.OwnMaskPolygons ??= new Map();
-  layer.InstanceHidingRemovers ??= new Map();
   layer.MaskEnabled = true;
 
   for (const [tilesetName, maskValue] of Object.entries(mask)) {
@@ -963,17 +505,7 @@ export async function applyMask(
     layer.OwnClippingPolygons!.set(tilesetName, newPolygons);
     layer.OwnMaskPolygons!.set(tilesetName, footprintsLngLat);
 
-    // For instanced tilesets: use per-instance hiding instead of clipping polygons
-    if (config.useInstanceHiding) {
-      if (!layer.InstanceHidingRemovers!.has(tilesetName)) {
-        const remover = setupInstanceHiding(tileset, footprintsLngLat, layer, tilesetName);
-        layer.InstanceHidingRemovers!.set(tilesetName, remover);
-      }
-      // Skip ClippingPolygon setup for instance hiding mode
-      continue;
-    }
-
-    // Apply clipping polygons (standard mode)
+    // Apply clipping polygons
     const alreadyContributed = layer.CesiumClippingCollections.has(tilesetName);
     if (tileset.clippingPolygons) {
       if (!alreadyContributed) {
@@ -995,38 +527,33 @@ export async function applyMask(
     if (config.removeIntersecting && !layer.TileListenerRemovers.has(tilesetName)) {
       const excludedIds = new Set<string>();
       layer.ExcludedFeatureIds.set(tilesetName, excludedIds);
-      const rawStyle = tilesetLayer?.get('style') as Record<string, unknown> | 'default' | undefined;
-      const baseStyle = rawStyle && rawStyle !== 'default' ? rawStyle : undefined;
-
-      const remover = tileset.tileLoad.addEventListener((tile) => {
-        if (!tile.content) return;
-        const content = tile.content as Cesium3DTileContent;
-        const len = content.featuresLength ?? 0;
-        let newExclusions = false;
-
-        for (let i = 0; i < len; i++) {
-          const feature = content.getFeature(i);
-          if (!feature) continue;
-          const id = getFeatureId(feature);
-          if (!id || excludedIds.has(id)) continue;
-          const center = getFeatureCenter(feature, content);
-          if (!center) continue;
-
-          for (const poly of footprintsLngLat) {
-            if (pointInPolygon2D(center, poly)) {
-              excludedIds.add(id);
-              newExclusions = true;
-              break;
-            }
-          }
-        }
-
-        if (newExclusions) updateTilesetStyleWithExclusions(tileset, excludedIds, baseStyle);
-      });
-
+      const baseStyle = getBaseStyle(tilesetLayer);
+      const remover = createTileLoadListener(tileset, excludedIds, footprintsLngLat, baseStyle);
       layer.TileListenerRemovers.set(tilesetName, remover);
     }
   }
+}
+
+/** Remove mask polygons from accumulated list */
+function removeMaskPolygons(accumulated: LngLat[][] | undefined, toRemove: LngLat[][]): void {
+  if (!accumulated) return;
+  
+  for (const maskPoly of toRemove) {
+    const idx = accumulated.findIndex(p => 
+      p.length === maskPoly.length && 
+      p.every((pt, i) => 
+        Math.abs(pt.lng - maskPoly[i].lng) < 1e-9 && 
+        Math.abs(pt.lat - maskPoly[i].lat) < 1e-9
+      )
+    );
+    if (idx !== -1) accumulated.splice(idx, 1);
+  }
+}
+
+/** Get base style for a tileset layer */
+function getBaseStyle(tilesetLayer: ThreedTileLayer | undefined): Record<string, unknown> | undefined {
+  const rawStyle = tilesetLayer?.get('style') as Record<string, unknown> | 'default' | undefined;
+  return rawStyle && rawStyle !== 'default' ? rawStyle : undefined;
 }
 
 /**
@@ -1047,59 +574,22 @@ export function disableMask(
   for (const [tilesetName, polygons] of ownPolygons) {
     const tilesetLayer = allLayers.find(l => l.get('name') === tilesetName);
     const tileset = tilesetLayer?.CesiumTileset;
-
-    // Remove instance hiding listener if it exists
-    const instanceHidingRemover = layer.InstanceHidingRemovers?.get(tilesetName);
-    if (instanceHidingRemover) {
-      instanceHidingRemover();
-      layer.InstanceHidingRemovers!.delete(tilesetName);
-      // Reset feature visibility for this tileset - traverse all visible tiles
-      if (tileset) {
-        try {
-          // Use tilesetTraversal to reset all features to visible
-          const resetVisibility = (tile: any) => {
-            if (tile.content && tile.content.featuresLength) {
-              for (let i = 0; i < tile.content.featuresLength; i++) {
-                const feature = tile.content.getFeature(i);
-                if (feature) feature.show = true;
-              }
-            }
-            tile.children?.forEach(resetVisibility);
-          };
-          if (tileset.root) resetVisibility(tileset.root);
-        } catch { /* ignore traversal errors */ }
-      }
-    }
-
     if (!tileset?.clippingPolygons) continue;
 
-    // Remove this layer's clipping polygons from the tileset
-    for (const polygon of polygons) {
-      tileset.clippingPolygons.remove(polygon);
-    }
+    // Remove clipping polygons
+    polygons.forEach(p => tileset.clippingPolygons!.remove(p));
 
-    // Remove this layer's mask polygons from tile visibility masking
+    // Remove mask polygons and update tile visibility
     const layerMaskPolygons = ownMaskPolygons?.get(tilesetName);
     if (tilesetLayer?.AccumulatedMaskPolygons && layerMaskPolygons) {
-      for (const maskPoly of layerMaskPolygons) {
-        const idx = tilesetLayer.AccumulatedMaskPolygons.findIndex(
-          p => p.length === maskPoly.length && p.every((pt, i) => 
-            Math.abs(pt.lng - maskPoly[i].lng) < 1e-9 && Math.abs(pt.lat - maskPoly[i].lat) < 1e-9
-          )
-        );
-        if (idx !== -1) {
-          tilesetLayer.AccumulatedMaskPolygons.splice(idx, 1);
-        }
-      }
+      removeMaskPolygons(tilesetLayer.AccumulatedMaskPolygons, layerMaskPolygons);
+      updateAllTileVisibility(tileset, tilesetLayer.AccumulatedMaskPolygons);
     }
 
-    // Disable removeIntersecting style exclusions
+    // Clear style exclusions (preserved in ExcludedFeatureIds for re-enable)
     const excludedIds = layer.ExcludedFeatureIds?.get(tilesetName);
     if (excludedIds?.size) {
-      const rawStyle = tilesetLayer?.get('style') as Record<string, unknown> | 'default' | undefined;
-      const baseStyle = rawStyle && rawStyle !== 'default' ? rawStyle : undefined;
-      // Temporarily clear exclusions (they're preserved in layer.ExcludedFeatureIds for re-enable)
-      updateTilesetStyleWithExclusions(tileset, new Set(), baseStyle);
+      updateTilesetStyleWithExclusions(tileset, new Set(), getBaseStyle(tilesetLayer));
     }
 
     // Remove tile load listener
@@ -1109,6 +599,35 @@ export function disableMask(
       layer.TileListenerRemovers!.delete(tilesetName);
     }
   }
+}
+
+/** Create tile load listener for removeIntersecting mode */
+function createTileLoadListener(
+  tileset: Cesium3DTileset,
+  excludedIds: Set<string>,
+  footprints: LngLat[][],
+  baseStyle: Record<string, unknown> | undefined
+): () => void {
+  return tileset.tileLoad.addEventListener((tile) => {
+    if (!tile.content) return;
+    const content = tile.content as Cesium3DTileContent;
+    const len = content.featuresLength ?? 0;
+    let newExclusions = false;
+
+    for (let i = 0; i < len; i++) {
+      const feature = content.getFeature(i);
+      if (!feature) continue;
+      const id = getFeatureId(feature);
+      if (!id || excludedIds.has(id)) continue;
+      const center = getFeatureCenter(feature, content);
+      if (center && isInsideMask(center, footprints)) {
+        excludedIds.add(id);
+        newExclusions = true;
+      }
+    }
+
+    if (newExclusions) updateTilesetStyleWithExclusions(tileset, excludedIds, baseStyle);
+  });
 }
 
 /**
@@ -1134,80 +653,36 @@ export function enableMask(
     const tileset = tilesetLayer?.CesiumTileset;
     if (!tileset) continue;
 
-    // Get mask config for this tileset
-    const maskValue = mask[tilesetName];
-    const config = parseMaskConfig(maskValue);
+    const config = parseMaskConfig(mask[tilesetName]);
     const layerMaskPolygons = ownMaskPolygons?.get(tilesetName);
-
-    // Re-setup instance hiding if that mode was used
-    if (config.useInstanceHiding) {
-      if (!layer.InstanceHidingRemovers?.has(tilesetName) && layerMaskPolygons) {
-        layer.InstanceHidingRemovers ??= new Map();
-        const remover = setupInstanceHiding(tileset, layerMaskPolygons, layer, tilesetName);
-        layer.InstanceHidingRemovers.set(tilesetName, remover);
-      }
-      continue; // Skip clipping polygon setup for instance hiding mode
-    }
 
     // Re-add clipping polygons
     if (tileset.clippingPolygons) {
-      for (const polygon of polygons) {
-        if (!tileset.clippingPolygons.contains(polygon)) {
-          tileset.clippingPolygons.add(polygon);
-        }
-      }
+      polygons.forEach(p => {
+        if (!tileset.clippingPolygons!.contains(p)) tileset.clippingPolygons!.add(p);
+      });
     } else {
       tileset.clippingPolygons = new ClippingPolygonCollection({ polygons });
     }
 
-    // Re-add mask polygons for tile visibility masking (unless skipTileVisibilityMasking)
+    // Re-add mask polygons and update tile visibility
     if (tilesetLayer && layerMaskPolygons && !config.skipTileVisibilityMasking) {
       tilesetLayer.AccumulatedMaskPolygons ??= [];
       tilesetLayer.AccumulatedMaskPolygons.push(...layerMaskPolygons);
+      updateAllTileVisibility(tileset, tilesetLayer.AccumulatedMaskPolygons);
     }
 
-    // Re-apply excluded feature IDs
+    // Re-apply style exclusions and tile load listener
     if (config.removeIntersecting) {
-      const excludedIds = layer.ExcludedFeatureIds?.get(tilesetName);
-      if (excludedIds?.size) {
-        const rawStyle = tilesetLayer?.get('style') as Record<string, unknown> | 'default' | undefined;
-        const baseStyle = rawStyle && rawStyle !== 'default' ? rawStyle : undefined;
+      const excludedIds = layer.ExcludedFeatureIds?.get(tilesetName) ?? new Set<string>();
+      const baseStyle = getBaseStyle(tilesetLayer);
+      
+      if (excludedIds.size) {
         updateTilesetStyleWithExclusions(tileset, excludedIds, baseStyle);
       }
 
-      // Re-add tile load listener for new features
       if (!layer.TileListenerRemovers?.has(tilesetName)) {
-        const footprintsLngLat = layerMaskPolygons ?? [];
-        const rawStyle = tilesetLayer?.get('style') as Record<string, unknown> | 'default' | undefined;
-        const baseStyle = rawStyle && rawStyle !== 'default' ? rawStyle : undefined;
-        const excludedIdsSet = excludedIds ?? new Set<string>();
-
-        const remover = tileset.tileLoad.addEventListener((tile) => {
-          if (!tile.content) return;
-          const content = tile.content as Cesium3DTileContent;
-          const len = content.featuresLength ?? 0;
-          let newExclusions = false;
-
-          for (let i = 0; i < len; i++) {
-            const feature = content.getFeature(i);
-            if (!feature) continue;
-            const id = getFeatureId(feature);
-            if (!id || excludedIdsSet.has(id)) continue;
-            const center = getFeatureCenter(feature, content);
-            if (!center) continue;
-
-            for (const poly of footprintsLngLat) {
-              if (pointInPolygon2D(center, poly)) {
-                excludedIdsSet.add(id);
-                newExclusions = true;
-                break;
-              }
-            }
-          }
-
-          if (newExclusions) updateTilesetStyleWithExclusions(tileset, excludedIdsSet, baseStyle);
-        });
-
+        const remover = createTileLoadListener(tileset, excludedIds, layerMaskPolygons ?? [], baseStyle);
         layer.TileListenerRemovers ??= new Map();
         layer.TileListenerRemovers.set(tilesetName, remover);
       }

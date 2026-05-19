@@ -296,36 +296,6 @@ const ortofotoCache = new LRUCache<string, { imageUrl: string; bounds: RoofColor
 const roofColorLodListeners = new Map<Cesium3DTileset, () => void>();
 
 /**
- * Loads pre-generated roof color data from a JSON file.
- */
-export async function loadRoofColorData(
-  dataUrl: string
-): Promise<{ imageUrl: string; bounds: RoofColorBounds } | null> {
-  try {
-    const response = await fetch(dataUrl);
-    if (!response.ok) return null;
-    
-    const data = await response.json();
-    if (!data.imageUrl || !data.bounds) return null;
-    
-    const bounds = data.bounds;
-    const needsConversion = Math.abs(bounds.west) > Math.PI * 2;
-    
-    return {
-      imageUrl: data.imageUrl,
-      bounds: needsConversion ? {
-        west: CesiumMath.toRadians(bounds.west),
-        east: CesiumMath.toRadians(bounds.east),
-        south: CesiumMath.toRadians(bounds.south),
-        north: CesiumMath.toRadians(bounds.north)
-      } : bounds
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Fetches ortofoto for an area around a point.
  */
 async function fetchHighResOrtofoto(

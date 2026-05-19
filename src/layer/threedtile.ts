@@ -22,8 +22,6 @@ import {
 } from 'cesium';
 import {
   createSolidRoofColorShader,
-  createOrtofotoRoofColorShader,
-  loadRoofColorData,
   getWmsLayerInfo,
   setupLodRoofColor
 } from '../functions/roofColorDraping';
@@ -67,8 +65,6 @@ interface LayerOptions {
   roofNormalThreshold?: number;
   /** Name of a WMS layer to sample roof colors from (e.g. "webservices:Ortofoto_0.16") */
   roofColorLayer?: string;
-  /** Pre-generated roof color data file (JSON with imageUrl and bounds). If set, skips WMS fetch */
-  roofColorData?: string;
   /** Camera altitude in meters to trigger high-res fetch (default 4000) */
   roofColorLodDistance?: number;
   /** Resolution of high-res ortofoto image (default 2048) */
@@ -368,38 +364,23 @@ async function loadTilesetLayer(
       const normalThreshold = (layer.get('roofNormalThreshold') as number | undefined) ?? 0.7;
       
       if (roofColor.toLowerCase() === 'sample') {
-        // Check for pre-generated data first
-        const roofColorData = layer.get('roofColorData') as string | undefined;
+        // Sample colors from ortofoto WMS with LOD support
+        const roofColorLayer = layer.get('roofColorLayer') as string | undefined;
+        const lodDistance = (layer.get('roofColorLodDistance') as number | undefined) ?? 4000;
+        const highResSize = (layer.get('roofColorImageSize') as number | undefined) ?? 2048;
+        const fetchRadius = (layer.get('roofColorFetchRadius') as number | undefined) ?? 600;
         
-        if (roofColorData) {
-          // Load pre-generated data (no WMS fetch needed)
-          loadRoofColorData(roofColorData).then(data => {
-            if (data) {
-              added.customShader = createOrtofotoRoofColorShader(data, normalThreshold);
-            } else {
-              console.warn(`roofColor: Failed to load pre-generated data from "${roofColorData}"`);
-              added.customShader = createSolidRoofColorShader('#808080', normalThreshold);
-            }
-          });
-        } else {
-          // Sample colors from ortofoto WMS with LOD support
-          const roofColorLayer = layer.get('roofColorLayer') as string | undefined;
-          const lodDistance = (layer.get('roofColorLodDistance') as number | undefined) ?? 4000;
-          const highResSize = (layer.get('roofColorImageSize') as number | undefined) ?? 2048;
-          const fetchRadius = (layer.get('roofColorFetchRadius') as number | undefined) ?? 600;
-          
-          if (roofColorLayer) {
-            const wmsInfo = getWmsLayerInfo(map, roofColorLayer);
-            if (wmsInfo) {
-              setupLodRoofColor(scene, added, normalThreshold, wmsInfo.url, wmsInfo.layers, lodDistance, highResSize, fetchRadius);
-            } else {
-              console.warn(`roofColor: Could not find WMS layer "${roofColorLayer}"`);
-              added.customShader = createSolidRoofColorShader('#808080', normalThreshold);
-            }
+        if (roofColorLayer) {
+          const wmsInfo = getWmsLayerInfo(map, roofColorLayer);
+          if (wmsInfo) {
+            setupLodRoofColor(scene, added, normalThreshold, wmsInfo.url, wmsInfo.layers, lodDistance, highResSize, fetchRadius);
           } else {
-            console.warn('roofColor: "sample" mode requires roofColorLayer or roofColorData');
+            console.warn(`roofColor: Could not find WMS layer "${roofColorLayer}"`);
             added.customShader = createSolidRoofColorShader('#808080', normalThreshold);
           }
+        } else {
+          console.warn('roofColor: "sample" mode requires roofColorLayer');
+          added.customShader = createSolidRoofColorShader('#808080', normalThreshold);
         }
       } else {
         // Solid color - parse hex RGB

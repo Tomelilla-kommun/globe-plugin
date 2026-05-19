@@ -415,6 +415,11 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
       const active = !btn.isActive();
       btn.setActive(active);
       if (active) {
+        // Close measure toolbar if open
+        if (measureUi?.isMeasureToolbarVisible()) {
+          measureUi.setMeasureToolbarVisible(false);
+          buttonManager.get(BUTTON_IDS.MEASURE_3D)?.setActive(false);
+        }
         polygonUi?.mountPolygonToolbarIfNeeded();
         polygonUi?.setPolygonToolbarVisible(true);
       } else {
@@ -427,6 +432,11 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
       const active = !btn.isActive();
       btn.setActive(active);
       if (active) {
+        // Close polygon toolbar if open
+        if (polygonUi?.isPolygonToolbarVisible()) {
+          polygonUi.setPolygonToolbarVisible(false);
+          buttonManager.get(BUTTON_IDS.DRAW_TOOL)?.setActive(false);
+        }
         measureUi.mountMeasureToolbarIfNeeded();
         measureUi.setMeasureToolbarVisible(true);
       } else {

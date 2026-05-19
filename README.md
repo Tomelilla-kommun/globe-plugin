@@ -198,6 +198,114 @@ Within `index.json`, add your custom 3D-tile layer as shown below:
 
 Changing `style` will affect the appearance of the 3D layer.
 
+### Roof color
+
+You can customize the roof color of 3D tile buildings using either a solid color or by sampling colors from an ortofoto WMS layer.
+
+#### Solid color
+
+```json
+{
+    "name": "Byggnader",
+    "title": "Byggnader",
+    "type": "THREEDTILE",
+    "url": "path/to/your/3Dtiles/tileset.json",
+    "visible": true,
+    "roofColor": "#B87333",
+    "roofNormalThreshold": 0.7
+}
+```
+
+#### Sample from WMS ortofoto
+
+To dynamically sample roof colors from an ortofoto (aerial photo) WMS layer:
+
+```json
+{
+    "name": "Byggnader",
+    "title": "Byggnader",
+    "type": "THREEDTILE",
+    "url": "path/to/your/3Dtiles/tileset.json",
+    "visible": true,
+    "roofColor": "sample",
+    "roofColorLayer": "webservices:Ortofoto_0.16",
+    "roofColorLodDistance": 4000,
+    "roofColorImageSize": 2048,
+    "roofColorFetchRadius": 600
+}
+```
+
+#### Roof color options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `roofColor` | string | - | Hex RGB color (e.g. `"#B87333"`) or `"sample"` to sample from WMS |
+| `roofNormalThreshold` | number | `0.7` | Threshold (0-1) for roof detection. Higher = only more horizontal surfaces |
+| `roofColorLayer` | string | - | Name of a WMS layer to sample colors from (required if `roofColor: "sample"`) |
+| `roofColorLodDistance` | number | `4000` | Camera altitude (meters) to trigger high-res fetch |
+| `roofColorImageSize` | number | `2048` | Resolution of high-res ortofoto image |
+| `roofColorFetchRadius` | number | `600` | Radius (meters) for high-res fetch area |
+
+### Clipping / Mask
+
+You can clip (cut holes in) 3D tilesets where GLB models are placed, so the models are visible through the buildings. This is useful when placing detailed models inside building tilesets.
+
+#### Basic clipping (model footprint)
+
+Clip a tileset using the footprint of GLB models with a buffer:
+
+```json
+{
+    "name": "DetailedBuilding",
+    "title": "Detailed Building",
+    "type": "THREEDTILE",
+    "dataType": "model",
+    "url": "path/to/models",
+    "visible": true,
+    "models": [
+        {
+            "fileName": "building.glb",
+            "lat": 55.547,
+            "lng": 13.949,
+            "height": 66.0
+        }
+    ],
+    "mask": {
+        "Byggnader": 5
+    }
+}
+```
+
+This clips a 5-meter buffer around the model in the tileset named "Byggnader".
+
+#### Clipping with GeoJSON polygon
+
+Use a custom GeoJSON polygon for more precise clipping:
+
+```json
+{
+    "name": "DetailedBuilding",
+    "type": "THREEDTILE",
+    "dataType": "model",
+    "url": "path/to/models",
+    "visible": true,
+    "models": [...],
+    "mask": {
+        "Byggnader": {
+            "buffer": 2,
+            "polygon": "data/mask/building_footprint.geojson"
+        }
+    }
+}
+```
+
+#### Mask configuration options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `buffer` | number | `0` | Buffer distance in meters around the clipping area |
+| `polygon` | string | - | Path to GeoJSON file defining the clipping polygon |
+
 ### glb/gltf models
 
 To add glb/gltf models, use the example below. Several models can be added inside the array "models".

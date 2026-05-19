@@ -29,6 +29,7 @@ export interface DrawToolOptions {
 export interface PolygonUiApi {
   mountPolygonToolbarIfNeeded(): void;
   setPolygonToolbarVisible(visible: boolean): void;
+  isPolygonToolbarVisible(): boolean;
   loadSharedPolygonsFromUrl(): CleanupFn | void;
   destroy(): void;
 }
@@ -393,6 +394,10 @@ export const createPolygonUi = (deps: {
       }
       requestSceneRender();
     }
+  };
+
+  const isPolygonToolbarVisible = (): boolean => {
+    return polygonToolbarEl?.style.display === 'flex';
   };
 
   const mountPolygonToolbarIfNeeded = () => {
@@ -1137,6 +1142,7 @@ export const createPolygonUi = (deps: {
   return {
     mountPolygonToolbarIfNeeded,
     setPolygonToolbarVisible,
+    isPolygonToolbarVisible,
     loadSharedPolygonsFromUrl,
     destroy,
   };

@@ -199,6 +199,114 @@ I `index.json`, lägg till ditt anpassade 3D-tile-lager enligt nedan:
 
 Ändring av `style` påverkar utseendet på 3D-lagret.
 
+### Takfärg
+
+Du kan anpassa takfärgen på 3D-tile-byggnader genom att använda antingen en enfärgad färg eller genom att sampla färger från ett ortofoto-WMS-lager.
+
+#### Enfärgad färg
+
+```json
+{
+    "name": "Byggnader",
+    "title": "Byggnader",
+    "type": "THREEDTILE",
+    "url": "sökväg/till/dina/3Dtiles/tileset.json",
+    "visible": true,
+    "roofColor": "#B87333",
+    "roofNormalThreshold": 0.7
+}
+```
+
+#### Sampla från WMS-ortofoto
+
+För att dynamiskt sampla takfärger från ett ortofoto (flygfoto) WMS-lager:
+
+```json
+{
+    "name": "Byggnader",
+    "title": "Byggnader",
+    "type": "THREEDTILE",
+    "url": "sökväg/till/dina/3Dtiles/tileset.json",
+    "visible": true,
+    "roofColor": "sample",
+    "roofColorLayer": "webservices:Ortofoto_0.16",
+    "roofColorLodDistance": 4000,
+    "roofColorImageSize": 2048,
+    "roofColorFetchRadius": 600
+}
+```
+
+#### Takfärgsalternativ
+
+| Alternativ | Typ | Standard | Beskrivning |
+|------------|-----|----------|-------------|
+| `roofColor` | string | - | Hex RGB-färg (t.ex. `"#B87333"`) eller `"sample"` för att sampla från WMS |
+| `roofNormalThreshold` | number | `0.7` | Tröskel (0-1) för takdetektering. Högre = endast mer horisontella ytor |
+| `roofColorLayer` | string | - | Namn på ett WMS-lager att sampla färger från (krävs om `roofColor: "sample"`) |
+| `roofColorLodDistance` | number | `4000` | Kamerahöjd (meter) för att utlösa högupplöst hämtning |
+| `roofColorImageSize` | number | `2048` | Upplösning på högupplöst ortofotobild |
+| `roofColorFetchRadius` | number | `600` | Radie (meter) för högupplöst hämtningsområde |
+
+### Klippning / Mask
+
+Du kan klippa (skära hål i) 3D-tilesets där GLB-modeller är placerade, så att modellerna syns genom byggnaderna. Detta är användbart när du placerar detaljerade modeller inuti byggnads-tilesets.
+
+#### Grundläggande klippning (modellfotavtryck)
+
+Klipp ett tileset med GLB-modellers fotavtryck med en buffert:
+
+```json
+{
+    "name": "DetaljByggnader",
+    "title": "Detaljerade Byggnader",
+    "type": "THREEDTILE",
+    "dataType": "model",
+    "url": "sökväg/till/modeller",
+    "visible": true,
+    "models": [
+        {
+            "fileName": "byggnad.glb",
+            "lat": 55.547,
+            "lng": 13.949,
+            "height": 66.0
+        }
+    ],
+    "mask": {
+        "Byggnader": 5
+    }
+}
+```
+
+Detta klipper en 5-meters buffert runt modellen i tilesetet med namnet "Byggnader".
+
+#### Klippning med GeoJSON-polygon
+
+Använd en anpassad GeoJSON-polygon för mer exakt klippning:
+
+```json
+{
+    "name": "DetaljByggnader",
+    "type": "THREEDTILE",
+    "dataType": "model",
+    "url": "sökväg/till/modeller",
+    "visible": true,
+    "models": [...],
+    "mask": {
+        "Byggnader": {
+            "buffer": 2,
+            "polygon": "data/mask/building_footprint.geojson"
+        }
+    }
+}
+```
+
+#### Mask-konfigurationsalternativ
+
+| Alternativ | Typ | Standard | Beskrivning |
+|------------|-----|----------|-------------|
+| `buffer` | number | `0` | Buffertavstånd i meter runt klippningsområdet |
+| `polygon` | string | - | Sökväg till GeoJSON-fil som definierar klippningspolygonen |
+
 ### glb/gltf-modeller
 
 För att lägga till glb/gltf-modeller, använd exemplet nedan. Flera modeller kan läggas till i arrayen "models".
@@ -224,6 +332,27 @@ För att lägga till glb/gltf-modeller, använd exemplet nedan. Flera modeller k
     ]
 }
 ```
+
+#### Modellanimeringsalternativ
+
+| Alternativ | Typ | Standard | Beskrivning |
+|------------|-----|----------|-------------|
+| `animation` | boolean | `false` | Aktivera animeringsuppspelning för denna modell |
+| `animationDuration` | number | (nativ hastighet) | Varaktighet i sekunder för en komplett animeringsloop |
+
+**Exempel med animering:**
+```json
+{
+    "fileName": "vindkraftverk.glb",
+    "lat": 55.547,
+    "lng": 13.949,
+    "height": 66.0,
+    "animation": true,
+    "animationDuration": 5
+}
+```
+
+Detta spelar upp modellens animering och slutför en hel loop var 5:e sekund. Om `animationDuration` utelämnas spelas animeringen upp med sin nativa hastighet.
 
 ### Extruderat 2D-lager
 
@@ -303,6 +432,16 @@ Med dessa kontroller kan användaren luta och rotera kameran med knappar.
 | **Höjd** | Mät vertikal höjdskillnad mellan två punkter |
 | **Fotavtryck** | Mät horisontell projicerad yta (som att titta rakt ner) - användbart för tomter och byggnadsytor |
 | **3D-yta** | Mät verklig 3D-ytarea - användbart för tak, väggar, sluttningar och terräng |
+
+#### Fotavtryck vs 3D-ytarea
+
+| Verktyg | Vad det mäter | Exempel (10×10m tak med 45° lutning) |
+|---------|---------------|--------------------------------------|
+| **Fotavtryck** | Horisontell projektion — "skuggans" area sett ovanifrån | ~100 m² |
+| **3D-yta** | Verklig 3D-ytarea — den faktiska lutade/kurvade ytan | ~141 m² |
+
+**Använd Fotavtryck för:** Tomter, byggnadsyta, planritningar, zonberäkningar
+**Använd 3D-yta för:** Takmaterial, målning av väggar, gräsfrö för sluttningar, faktiska materialuppskattningar
 
 Så här använder du:
 1. Välj mätläge från verktygsfältet.
