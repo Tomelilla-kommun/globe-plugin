@@ -15,14 +15,18 @@ Install ol-cesium:
 ```
 npm install olcs
 ```
-In [origo.js](https://github.com/origo-map/origo/blob/master/origo.js), add:
+In [origo.js](https://github.com/origo-map/origo/blob/master/origo.js), add the following two lines:
 
-```
-import OLCesium from 'olcs/OLCesium';
+```diff
+  ...
+  import layerType from './src/layer/layertype';
++ import OLCesium from 'olcs/OLCesium';
 
-window.OLCesium = OLCesium;
+  const Origo = function Origo(configPath, options = {}) {
++   window.OLCesium = OLCesium;
+    let origo;
+    ...
 ```
-s
 ## Configuration
 
 All globe settings can be configured in `index.json` under the `"3D"` section. This keeps all 3D-related configuration in one place.
