@@ -1,0 +1,12 @@
+diff --git a/node_modules/olcs/lib/olcs/contrib/Manager.js b/node_modules/olcs/lib/olcs/contrib/Manager.js
+index a314a5b..3076154 100644
+--- a/node_modules/olcs/lib/olcs/contrib/Manager.js
++++ b/node_modules/olcs/lib/olcs/contrib/Manager.js
+@@ -1,6 +1,6 @@
+ import Observable from 'ol/Observable.js';
+ import OLCesium from '../OLCesium.js';
+-import { computeSignedTiltAngleOnGlobe, limitCameraToBoundingSphere, pickBottomPoint, resetToNorthZenith, rotateAroundBottomCenter, setHeadingUsingBottomCenter, } from '../core';
++import { computeSignedTiltAngleOnGlobe, limitCameraToBoundingSphere, pickBottomPoint, resetToNorthZenith, rotateAroundBottomCenter, setHeadingUsingBottomCenter, } from '../core.js';
+ import { toRadians } from '../math.js';
+ import olcsContribLazyLoader from './LazyLoader.js';
+ /**
