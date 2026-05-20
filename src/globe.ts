@@ -136,12 +136,8 @@ console.log('[Globe Plugin] Cesium version:', (Cesium as any).VERSION);
 // ============================================================================
 
 /**
- * Ensures all OL vector layers have an altitudeMode set so OLCesium knows
- * how to render them in Cesium. Layers that already have the property are
- * left untouched. Recurses into LayerGroups and watches for layers added
- * after initialisation.
- *
- * Returns a cleanup function that removes the event listeners.
+ * Ensures all OL vector layers have an altitudeMode.
+ * Layers that already have the property are left untouched.
  */
 const defaultAltitudeMode = (mapObj: any, mode = 'clampToGround'): CleanupFn => {
   const cleanups: Array<() => void> = [];
