@@ -13,7 +13,7 @@
 
 import * as Cesium from 'cesium';
 import flatpickr from 'flatpickr';
-import OLCesium from 'olcs/OLCesium';
+import OLCesium from 'olcs';
 import Origo, { OrigoButton, OrigoElement } from 'Origo';
 
 // Layer utilities
@@ -129,6 +129,7 @@ setCameraHeight(1.6);
 setIsStreetMode(false);
 window.Cesium = Cesium;
 window.OLCesium = OLCesium;
+console.log('[Globe Plugin] Cesium version:', (Cesium as any).VERSION);
 
 // ============================================================================
 // Globe Plugin

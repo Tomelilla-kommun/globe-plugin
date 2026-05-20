@@ -23,62 +23,17 @@
   <script type="text/javascript">
     window.Origo.layerType.THREEDTILE = window.Globe().threedtiletype();
     //Init origo
-    var origo = Origo('index.json');
-    origo.on('load', function (viewer) {
-      var globe = Globe({
-        showGlobe: true,
-        globeOnStart: true,
-        viewShed: true,
-        streetView: true,
-        fx: false,
-        cameraControls: true,
-        measure: true,
-        quickTimeShadowPicker: true,
-        flyTo: false,
-        deactivateControls: [],
-        settings: {
-          depthTestAgainstTerrain: true,
-          enableAtmosphere: true,
-          enableGroundAtmosphere: true,
-          enableFog: true,
-          shadows: {
-            fadingEnabled: true,
-            maximumDistance: 5000,
-            normalOffset: true,
-            size: 2048,
-            softShadows: false
-          },
-          skyBox: {
-            url: "plugins/globe/cesiumassets/Assets/Textures/SkyBox/",
-            images: {
-              pX: "tycho2t3_80_px.jpg",
-              nX: "tycho2t3_80_mx.jpg",
-              pY: "tycho2t3_80_py.jpg",
-              nY: "tycho2t3_80_my.jpg",
-              pZ: "tycho2t3_80_pz.jpg",
-              nZ: "tycho2t3_80_mz.jpg"
-            }
-          }
-        },
-        "cesiumIontoken": "",
-        /* Example for GLTF model
-        "gltf": [
-          {
-            "url": "example.gltf",
-            "lat": 18.13764,
-            "lng": 59.16456,
-            "height": 100,
-            // This overrides height if not set to NONE, se options @ https://cesium.com/learn/cesiumjs/ref-doc/global.html?classFilter=Height#HeightReference
-            "heightReference": "CLAMP_TO_TERRAIN",
-            "animation": false
-          }
-        ],
-        */
-        "cesiumTerrainProvider": "",
-        "cesiumIonassetIdTerrain": ""
+      origo.on('load', async (viewer) => {
+        const text = await fetch('index.json').then(r => r.text());
+        const cleaned = text
+          .replace(/^\s*\/\/.*$/gm, '')
+          .replace(/\/\*[\s\S]*?\*\//g, ''); 
+        const indexJson = JSON.parse(cleaned);
+        const globe = Globe({
+          indexJson: indexJson,
+        });
+        viewer.addComponent(globe);
       });
-      viewer.addComponent(globe);
-    });
   </script>
 
 </body>
