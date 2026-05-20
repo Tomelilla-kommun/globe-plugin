@@ -132,6 +132,44 @@ window.OLCesium = OLCesium;
 console.log('[Globe Plugin] Cesium version:', (Cesium as any).VERSION);
 
 // ============================================================================
+// Layer Altitude Mode Helper
+// ============================================================================
+
+/**
+ * Ensures all OL vector layers have an altitudeMode set so OLCesium knows
+ * how to render them in Cesium. Layers that already have the property are
+ * left untouched. Recurses into LayerGroups and watches for layers added
+ * after initialisation.
+ *
+ * Returns a cleanup function that removes the event listeners.
+ */
+const defaultAltitudeMode = (mapObj: any, mode = 'clampToGround'): CleanupFn => {
+  const cleanups: Array<() => void> = [];
+
+  const apply = (layer: any) => {
+    if (layer.get('altitudeMode') == null) {
+      layer.set('altitudeMode', mode);
+    }
+    // Recurse into layer groups
+    if (typeof layer.getLayers === 'function') {
+      layer.getLayers().forEach(apply);
+      const onGroupAdd = (evt: any) => apply(evt.element);
+      layer.getLayers().on('add', onGroupAdd);
+      cleanups.push(() => layer.getLayers().un('add', onGroupAdd));
+    }
+  };
+
+  const root = mapObj.getLayers();
+  root.forEach(apply);
+
+  const onRootAdd = (evt: any) => apply(evt.element);
+  root.on('add', onRootAdd);
+  cleanups.push(() => root.un('add', onRootAdd));
+
+  return () => cleanups.forEach(fn => fn());
+};
+
+// ============================================================================
 // Globe Plugin
 // ============================================================================
 
@@ -616,6 +654,10 @@ const Globe = function Globe(options: GlobeOptionsInput = {}) {
 
       // Initialize time setter
       registerOptionalCleanup(initTimeSetter());
+
+      // Default missing altitudeMode to clampToGround for all OL layers
+      // so OLCesium renders them draped on terrain unless explicitly overridden.
+      registerCleanup(defaultAltitudeMode(map));
 
       // Create OLCesium
       oGlobe = new window.OLCesium({
