@@ -40,7 +40,7 @@ All globe settings can be configured in `index.json` under the `"3D"` section. T
     "globeOnStart": true,
     "viewShed": true,
     "streetView": true,
-    "streetViewMap": "name of a layer from 'ayers' config",
+    "streetViewMap": "name of a layer from 'layers' config",
     "drawTool": {
       "active": true,
       "options": {
@@ -58,6 +58,7 @@ All globe settings can be configured in `index.json` under the `"3D"` section. T
     "measure": true,
     "quickTimeShadowPicker": true,
     "flyTo": false,
+    "hide2DControlsInGlobe": [".o-measure", ".o-draw", ".o-search"],
     "settings": {
       "depthTestAgainstTerrain": true,
       "enableAtmosphere": true,
@@ -103,6 +104,7 @@ All globe settings can be configured in `index.json` under the `"3D"` section. T
 | `measure` | boolean | `false` | Enable 3D measurement tools |
 | `quickTimeShadowPicker` | boolean | `false` | Enable quick time/date picker for shadows |
 | `flyTo` | boolean | `false` | Animate camera when selecting objects |
+| `hide2DControlsInGlobe` | string[] | `[]` | 2D controls that should be hidden when globe mode is active |
 | `drawTool` | object/boolean | `false` | Drawing tool configuration (see below) |
 | `cesiumIontoken` | string | - | Your Cesium Ion access token |
 | `cesiumTerrainProvider` | string | - | Path to custom terrain tiles |
@@ -158,7 +160,11 @@ With the new configuration system, `index.html` only needs:
 
 ```js
 origo.on('load', async (viewer) => {
-  const indexJson = await fetch('index.json').then(r => r.json());
+  const text = await fetch('index.json').then(r => r.text());
+  const cleaned = text // option to allow comments in index.json
+    .replace(/^\s*\/\/.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  const indexJson = JSON.parse(cleaned);
   const globe = Globe({
     indexJson: indexJson,
   });
@@ -296,19 +302,23 @@ Use a custom GeoJSON polygon for more precise clipping:
     "models": [...],
     "mask": {
         "Byggnader": {
-            "buffer": 2,
             "polygon": "data/mask/building_footprint.geojson"
+        },
+        "Trad": {
+            "polygon": "data/mask/mask_trees_poly.geojson",
+            "buffer": 2
         }
     }
 }
 ```
+Multiple mask layers can be defined, and an additional buffer distance can be added.
 
 #### Mask configuration options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `buffer` | number | `0` | Buffer distance in meters around the clipping area |
 | `polygon` | string | - | Path to GeoJSON file defining the clipping polygon |
+| `buffer` | number | `0` | Buffer distance in meters around the clipping area |
 
 ### glb/gltf models
 
