@@ -367,6 +367,76 @@ To add glb/gltf models, use the example below. Several models can be added insid
 
 This plays the model's animation, completing one full loop every 5 seconds. If `animationDuration` is omitted, the animation plays at its native speed.
 
+### GLB/GLTF models with WFS
+
+Origo Globe supports visualizing GLB/GLTF models placed at point features from a WFS service. This is useful for objects such as street lights, wind turbines, benches, signs, waste bins, and similar point objects.
+
+Two components are required:
+- **Model files** — GLB/GLTF files served alongside the application
+- **WFS service** — a point layer with attributes for object type, rotation, and scale
+
+> **Note:** To maintain good performance in Origo Globe, it is recommended to only request a limited area of 3D objects via WFS.
+
+```json
+{
+    "name": "geostore:objects_globe",
+    "title": "3D Objects",
+    "group": "threed",
+    "queryable": true,
+    "source": "geostore",
+    "dataSource": "https://your-wfs/",
+    "type": "THREEDTILE",
+    "visible": true,
+    "style": "none",
+    "model": {
+        "height": "hojd",
+        "width": "bred",
+        "type": "model",
+        "rotation": "rotation",
+        "types": {
+            "StreetLampDouble": {
+                "baseModel": "/data/models/StreetLampDouble.glb",
+                "modelHeight": 3
+            },
+            "StreetLampSingle": {
+                "baseModel": "/data/models/StreetLampSingle.glb",
+                "modelHeight": 3
+            },
+            "Windturbine": {
+                "baseModel": "/data/models/Windturbine.glb",
+                "modelHeight": 10,
+                "animated": true,
+                "animationDuration": 6
+            },
+            "Bench": {
+                "baseModel": "/data/models/Bench.glb",
+                "modelHeight": 1
+            }
+        }
+    }
+}
+```
+
+#### `model` configuration options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `height` | string | WFS attribute name for the object's height/scale |
+| `width` | string | WFS attribute name for the object's width/scale |
+| `type` | string | WFS attribute name that identifies the object type (maps to a key in `types`) |
+| `rotation` | string | WFS attribute name for the rotation in degrees |
+| `types` | object | Dictionary mapping type values to model configurations (see below) |
+
+#### `types` entry options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `baseModel` | string | - | Path to the GLB/GLTF model file |
+| `modelHeight` | number | - | Native height of the model in meters, used for scaling |
+| `animated` | boolean | `false` | Enable animation playback for this model type |
+| `animationDuration` | number | (native speed) | Duration in seconds for one complete animation loop |
+
+
 ### Extruded 2D-layer
 
 To add 2D data as 3D extruded objects, add the layer as shown below.
