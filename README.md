@@ -5,7 +5,7 @@ A plugin for [Origo map](https://github.com/origo-map/origo) to enable a [Cesium
 
 ## Setup
 
-See [index_example.html](https://github.com/haninge-geodata/origo-globe-plugin/blob/main/index_example.html) and [index_example.json](https://github.com/haninge-geodata/origo-globe-plugin/blob/main/index_example.json) to get started with configuration.
+See [index_example.html](index_example.html) and [index_example.json](index_example.json) to get started with configuration.
 
 Copy the files in the `build` folder and place them in Origo's `plugins/globe` folder.
 
@@ -118,7 +118,7 @@ All globe settings can be configured in `index.json` under the `"3D"` section. T
     "export": {
       "geojson": true,
       "dxf": true,
-      "dxfCrs": ["EPSG:3008", "EPSG:4326"]
+      "dxfCrs": ["EPSG:3006", "EPSG:4326"]
     },
     "share": true,
     "defaultColor": "white",

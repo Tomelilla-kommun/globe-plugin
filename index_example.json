@@ -57,6 +57,68 @@
         "name": "measure"
       }
     ],
+
+    "3D": {
+      "showGlobe": true,
+      "globeOnStart": true,
+      "viewShed": true,
+      "streetView": true,
+      "streetViewMap": "webservices:topowebbkartan",
+      "drawTool": {
+        "active": true,
+        "options": {
+          "export": {
+            "geojson": true,
+            "dxf": true,
+            "dxfCrs": [
+              "EPSG:3006",
+              "EPSG:4326"
+            ]
+          },
+          "share": true,
+          "defaultColor": "white",
+          "defaultHeight": 10
+        }
+      },
+      "cameraControls": true,
+      "measure": true,
+      "quickTimeShadowPicker": true,
+      "flyTo": false,
+      "hide2DControlsInGlobe": [
+        ".o-measure",
+        ".o-print",
+        ".o-link"
+      ],
+      "settings": {
+        "depthTestAgainstTerrain": true,
+        "enableAtmosphere": true,
+        "enableGroundAtmosphere": true,
+        "enableFog": false,
+        "enableLighting": true,
+        "shadows": {
+          "darkness": 0.3,
+          "fadingEnabled": true,
+          "maximumDistance": 1500,
+          "normalOffset": true,
+          "size": 4096,
+          "softShadows": false
+        },
+        "skyBox": {
+          "url": "plugins/globe/cesiumassets/Assets/Textures/SkyBox/",
+          "images": {
+            "pX": "tycho2t3_80_px.jpg",
+            "nX": "tycho2t3_80_mx.jpg",
+            "pY": "tycho2t3_80_py.jpg",
+            "nY": "tycho2t3_80_my.jpg",
+            "pZ": "tycho2t3_80_pz.jpg",
+            "nZ": "tycho2t3_80_mz.jpg"
+          }
+        }
+      },
+      "cesiumIontoken": "xxxxxx",
+      "cesiumTerrainProvider": "data/terrain/"
+    },
+
     "pageSettings": {
       "footer": {
         "img": "img/png/logo.png",
@@ -90,7 +152,7 @@
       1810000,
       8390000
     ],
-    "zoom": 5.7,
+    "zoom": 5,
     "resolutions": [
       156543.03390625,
       78271.516953125,
@@ -124,6 +186,7 @@
       2.915841227513738E-4,
       1.457920613756869E-4
     ],
+
     "featureinfoOptions": {
       "infowindow": "infowindow"
     },
@@ -135,82 +198,137 @@
     "groups": [
       {
         "name": "background",
-        "title": "Bakgrundskartor",
+        "title": "Background maps",
         "expanded": true
+      },
+      {
+      "name": "threed",
+      "title": "3D layers",
+      "expanded": false
+      },
+      {
+      "name": "twod",
+      "title": "2D layers",
+      "expanded": false
       }
     ],
+
+    // No Cesium Ion token is required for the examples below.
+    // Ion tokens are only needed for Cesium-hosted assets such as OSM Buildings and Cesium World Terrain.
+    
     "layers": [
-      // OSM Buildings needs Ion token
+      
+      // 3D-tile buildings with roof color sampling
       {
-        "name": "osm-buildings",
-        "title": "OSM Byggnader",
+        "name": "Buildings",
+        "title": "Buildings",
         "type": "THREEDTILE",
-        "abstract": "Byggnader från Open Street Map",
-        "url": "OSM-Buildings",
-        "group": "root",
+        "abstract": "Buidling tiles",
+        "url": "data/buildings/tileset.json",
+        "group": "threed",
         "queryable": true,
         "maximumScreenSpaceError": 16,
+        "maximumMemoryUsage": 2048,
         "showOutline": true,
-        "outlineColor": "SNOW",
+        "outlineColor": "BLACK",
+        "roofColor": "sample",
+        "roofNormalThreshold": 0.2,
+        "roofColorLayer": "webservices:Ortofoto_0.16",
+        "roofColorLodDistance": 6000,
+        "roofColorImageSize": 3072,
+        "roofColorFetchRadius": 1200,
         "visible": true,
-        "filter": "${feature['elementId']} !== 251329024 && ${feature['elementId']} !== 425027205 && ${feature['elementId']} !== 425002757",
-        "style": [
-          [
-            "${feature['building']} === 'civic' || ${feature['building']} === 'construction' || ${feature['building']} === 'church'",
-            "color('#ed6258', 1)"
-          ],
-          [
-            "${feature['building']} === 'commercial' || ${feature['building']} === 'retail' || ${feature['building']} === 'office'",
-            "color('#af8b74', 1)"
-          ],
-          [
-            "${feature['building']} === 'apartments' || ${feature['building']} === 'residential' || ${feature['building']} === 'house' || ${feature['building']} === 'yes' || ${feature['building']} === 'roof'",
-            "color('#c98754', 1)"
-          ],
-          [
-            "${feature['building']} === 'warehouse' || ${feature['building']} === 'manufacture' || ${feature['building']} === 'industrial'",
-            "color('#919494', 1)"
-          ],
-          [
-            "${feature['building']} === 'school' || ${feature['amenity']} === 'university' || ${feature['building']} === 'kindergarten'",
-            "color('#ef7f77', 1)"
-          ],
-          [
-            "${feature['building']} === 'parking' || ${feature['amenity']} === 'parking' || ${feature['building']} === 'garages' || ${feature['building']} === 'garage'",
-            "color('#af8b74', 1)"
-          ],
-          [
-            "${feature['building']} === 'farm_auxiliary' || ${feature['building']} === 'detached'",
-            "color('#a69774', 1)"
-          ],
-          [true, "color('#ef7f77', 1)"]
+        "style": {
+            "color": "color('#FFFFFF', 1)"
+        }
+      },
+
+      {
+        "name": "Trees",
+        "title": "Trees",
+        "type": "THREEDTILE",
+        "abstract": "Tree tiles",
+        "url": "data/trees/tileset.json",
+        "group": "threed",
+        "queryable": true,
+        "maximumScreenSpaceError": 16,
+        "maximumMemoryUsage": 2048,
+        "showOutline": true,
+        "outlineColor": "BLACK",
+        "showShadows": false,
+        "visible": true,
+        "style": "none"
+      },
+
+      // GLB/GLTF model with clipping of existing building layer
+      {
+        "name": "custom_model",
+        "title": "Custom 3D model",
+        "type": "THREEDTILE",
+        "group": "threed",
+        "dataType": "model",
+        "url": "data/GLB_models/",
+        "mask": {
+          "Buildings": {
+            "buffer": 2,
+            "polygon": "data/mask/mask_wgs84.geojson"
+          }
+        },
+        "visible": true,
+        "models": [
+          {
+            "fileName": "custom_model_1.glb",
+            "lat": 55.72612394884369,
+            "lng": 14.096412337936734,
+            "height": 0.0,
+            "heightReference": "NONE",
+            "rotHeading": 0,
+            "animation": false
+          }
         ]
       },
+
+      // GLB/GLTF wind turbine models with WFS
       {
-        "name": "origo-cities",
-        "title": "Origokommuner",
-        "group": "root",
-        "source": "data/origo-cities-3857.geojson",
-        "style": "origo-logo",
-        "type": "GEOJSON",
-        "attributes": [
-          {
-            "name": "name"
+        "name": "geoserver:windturbine_points",
+        "title": "Wind turbines",
+        "abstract": "",
+        "group": "threed",
+        "queryable": true,
+        "dataSource": "https://your-wfs/",
+        "type": "THREEDTILE",
+        "visible": true,
+        "style": "none",
+        "model": {
+          "height": "TOTALHEIGHT",
+          "width": "ROTORDIAMETER",
+          "type": "TURBINETYPE",
+          "rotation": 0,
+          "types": {
+            "Turbine": {
+              "baseModel": "/data/models/Windturbine.glb",
+              "modelHeight": 100,
+              "animated": true,
+              "animationDuration": 10
+            }
           }
-        ],
-        "visible": true
+        }
       },
+
+      // Normal 2D layer
       {
-        "name": "origo-mask",
-        "opacity": 0.25,
-        "title": "origo-mask",
-        "group": "none",
-        "queryable": false,
-        "source": "data/origo-mask-3857.geojson",
-        "style": "mask",
-        "type": "GEOJSON",
-        "visible": true
-      },
+      "name": "geoserver:2Dlayer",
+      "title": "Example of normal 2D layer",
+      "group": "twod",
+      "queryable": true,
+      "source": "local",
+      "type": "WMS",
+      "visible": false,
+      "hasThemeLegend": true,
+      "opacity": 0.7
+    },
+
+      // Normal background layer
       {
         "name": "osm",
         "title": "OpenStreetMap",
